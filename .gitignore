@@ -1,0 +1,18 @@
+# Downloaded ACMA data and partial downloads (rebuilt by update_data.py)
+cache/
+*.part
+spectra_rrl.zip
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

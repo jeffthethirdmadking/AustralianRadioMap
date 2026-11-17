@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="en-AU">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Australian radio stations: street map</title>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <main>
+            <h1>Australian radio stations</h1>
+            <p class="sub">
+                Street map from OpenStreetMap. Choose a radio type, then enter a suburb or address, or tap &ldquo;Find
+                me&rdquo; to use your device&rsquo;s location. Your choices are remembered for next time.
+            </p>
+            <div class="controls">
+                <div class="states" id="types" role="group" aria-label="Radio type"></div>
+                <div class="states" id="states" role="group" aria-label="State"></div>
+                <form class="addr" id="addr">
+                    <input
+                        id="aq"
+                        type="search"
+                        placeholder="Suburb or address, e.g. Broken Hill NSW"
+                        aria-label="Suburb or address"
+                        autocomplete="off"
+                    />
+                    <div class="buttons">
+                        <button class="me" type="submit">Search</button>
+                        <button class="me" id="me" type="button">Find me</button>
+                    </div>
+                </form>
+                <div class="alts" id="alts"></div>
+            </div>
+            <div class="tools">
+                <input id="q" type="search" placeholder="Search site, call sign or postcode" aria-label="Search" />
+                <select id="ch" aria-label="Channel">
+                    <option value="">All channels</option>
+                </select>
+            </div>
+            <div class="opts" id="opts" hidden role="group" aria-label="Line options">
+                <span class="opts-title">Lines</span>
+                <label class="chip"><input type="checkbox" id="olines" checked /><span>Draw lines</span></label>
+                <label class="chip"><input type="checkbox" id="olabels" checked /><span>Distance labels</span></label>
+                <label class="chip"><input type="checkbox" id="ochan" checked /><span>RX / TX labels</span></label>
+                <label class="pick">
+                    <span>To nearest</span>
+                    <select id="ncount">
+                        <option value="3">3</option>
+                        <option value="5" selected>5</option>
+                        <option value="10">10</option>
+                        <option value="all">All shown</option>
+                    </select>
+                </label>
+            </div>
+            <div id="map" role="application" aria-label="Map of repeaters"></div>
+            <p class="legend" id="legend"></p>
+            <p class="status" id="tilemsg" role="alert"></p>
+            <p class="status" id="status" aria-live="polite"></p>
+            <details class="box" id="nearBox" hidden>
+                <summary id="nearSummary">Nearest to you</summary>
+                <div class="near" id="near"></div>
+            </details>
+            <details class="box" id="chartBox" hidden>
+                <summary id="chartSummary">Distance chart</summary>
+                <div id="distChart" class="dist-chart"></div>
+            </details>
+            <p class="note">
+                Licensed entries from the ACMA register, not live status. Channel 5 repeaters are for emergencies only.
+                Distances are straight-line, not driving distance. For UHF CB, RX is the channel you listen on and TX
+                is the channel you transmit on (30 higher). Marine, amateur and aeronautical entries show the frequency
+                the station transmits on. Press the duplex button on your radio to use a repeater.
+            </p>
+            <p class="note">
+                <strong>AI disclosure:</strong> this page was written and modified with the help of Claude, an AI assistant made by Anthropic. The code and the way the register data was processed (including how station type is worked out) may contain mistakes. Check details against the official register before relying on them, and never rely on this page alone in an emergency.
+            </p>
+            <section class="about box" style="border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-top:16px">
+                <h2>Data sources</h2>
+                <p id="datasource"></p>
+                <ul>
+                    <li><a href="https://www.acma.gov.au/radiocomms-licence-data" target="_blank" rel="noopener">ACMA Register of Radiocommunications Licences</a>: source of the station data</li>
+                    <li><a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a> (via <a href="https://cdnjs.com/libraries/leaflet" target="_blank" rel="noopener">cdnjs</a>): map library</li>
+                    <li><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap tiles</a> and <a href="https://nominatim.org/" target="_blank" rel="noopener">Nominatim</a>: map tiles and address search</li>
+                    <li><a href="https://www.arcgis.com/home/item.html?id=de26a3cf4cc9451298ea173c4b324736" target="_blank" rel="noopener">Esri World Street Map</a> and <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9" target="_blank" rel="noopener">World Imagery</a>: map tiles</li>
+                    <li><a href="https://github.com/Raruto/leaflet-rotate" target="_blank" rel="noopener">leaflet-rotate</a> (via <a href="https://www.jsdelivr.com/package/npm/leaflet-rotate" target="_blank" rel="noopener">jsDelivr</a>): map rotation</li>
+                    <li><a href="https://carto.com/basemaps/" target="_blank" rel="noopener">CARTO basemaps</a>: map tiles</li>
+                    <li><a href="https://photon.komoot.io/" target="_blank" rel="noopener">Photon (Komoot)</a>: address search</li>
+                    <li><a href="https://open-meteo.com/en/docs/geocoding-api" target="_blank" rel="noopener">Open-Meteo Geocoding API</a>: address search fallback</li>
+                    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API" target="_blank" rel="noopener">Geolocation API</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events" target="_blank" rel="noopener">Device Orientation events</a>: your position and compass, used only in your browser</li>
+                    <li><a href="https://developers.google.com/maps/documentation/urls/get-started" target="_blank" rel="noopener">Google Maps URLs</a>: the Directions links</li>
+                </ul>
+            </section>
+        </main>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
+        <script src="data/repeaters.js"></script>
+        <script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// Column positions inside each station record in data/repeaters.js
+const FIELD = {
+    state: 0, siteName: 1, postcode: 2, lat: 3, lon: 4, callSign: 5, licenceNumber: 6,
+    channel: 7, outputMhz: 8, powerWatts: 9, antennaHeightM: 10, polarisation: 11,
+    licenceDate: 12, antennaType: 13, radioType: 14, emission: 15, bandwidthKhz: 16, band: 17,
+};
+
+const STATE_ORDER = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT", "Unknown"];
+
+const RADIO_TYPES = [
+    { id: "cb", label: "UHF CB", color: "#0d6a5a" },
+    { id: "mvhf", label: "Marine VHF", color: "#2f7de1" },
+    { id: "mhf", label: "Marine HF", color: "#9a63d6" },
+    { id: "ama", label: "Amateur", color: "#d9822b" },
+    { id: "air", label: "Aeronautical", color: "#8a9a93" },
+];
+const TYPE_LABEL = Object.fromEntries(RADIO_TYPES.map((t) => [t.id, t.label]));
+const TYPE_COLOR = Object.fromEntries(RADIO_TYPES.map((t) => [t.id, t.color]));
+const EMERGENCY_COLOR = "#b3261e";
+
+// UHF CB repeaters: you listen on the repeater channel and transmit 30 channels
+// higher, which is 0.75 MHz below the repeater's output frequency.
+const CB_TX_CHANNEL_OFFSET = 30;
+const CB_TX_FREQUENCY_OFFSET_MHZ = 0.75;
+const EMERGENCY_CHANNEL = 5;
+const MAX_CHART_BARS = 15;
+const MAX_LABELLED_LINES = 25; // permanent labels on hundreds of lines are unreadable
+
+const SETTINGS_KEY = "auRadioMap.settings.v1";
+const DB_NAME = "auRadioMap";
+const DB_STORE = "cache";
+const DB_KEY = "stations";
+
+const DEFAULT_SETTINGS = {
+    radioType: "cb",
+    state: "All",
+    channel: "",
+    filterText: "",
+    nearestCount: "5",
+    showLines: true,
+    showDistanceLabels: true,
+    showChannelLabels: true,
+    baseMap: "Streets (Esri)",
+    compassMode: "north", // "north" or "follow"
+    location: null, // { lat, lon, label, query }
+    view: null, // { lat, lon, zoom }
+};
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+const el = (id) => document.getElementById(id);
+
+function escapeHtml(text) {
+    const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+    return String(text).replace(/[&<>"]/g, (c) => entities[c]);
+}
+
+function distanceKm(from, to) {
+    const toRad = Math.PI / 180;
+    const dLat = (to[0] - from[0]) * toRad;
+    const dLon = (to[1] - from[1]) * toRad;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(from[0] * toRad) * Math.cos(to[0] * toRad) * Math.sin(dLon / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(a));
+}
+
+function formatKm(km) {
+    return (km < 10 ? km.toFixed(1) : Math.round(km)) + " km";
+}
+
+const hasPosition = (s) => s[FIELD.lat] != null;
+const isCb = (s) => s[FIELD.radioType] === "cb";
+const isEmergency = (s) => s[FIELD.channel] === EMERGENCY_CHANNEL;
+const cbTxChannel = (s) => s[FIELD.channel] + CB_TX_CHANNEL_OFFSET;
+const cbTxMhz = (s) => s[FIELD.outputMhz] - CB_TX_FREQUENCY_OFFSET_MHZ;
+const mhz = (value) => value.toFixed(4) + " MHz";
+
+// Short badge text: CB channel number, or frequency for other radio types
+const badgeText = (s) => (s[FIELD.channel] != null ? s[FIELD.channel] : s[FIELD.outputMhz].toFixed(3));
+
+// One-line RX / TX summary with channels and frequencies
+function frequencySummary(s) {
+    if (s[FIELD.channel] == null) {
+        return `${TYPE_LABEL[s[FIELD.radioType]]} &middot; station transmits ${mhz(s[FIELD.outputMhz])}`;
+    }
+    return (
+        `RX ch ${s[FIELD.channel]} (${mhz(s[FIELD.outputMhz])}) &middot; ` +
+        `TX ch ${cbTxChannel(s)} (${mhz(cbTxMhz(s))})`
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Saved settings (localStorage)
+// ---------------------------------------------------------------------------
+
+let settings = { ...DEFAULT_SETTINGS };
+
+function loadSettings() {
+    try {
+        settings = { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    } catch (error) {
+        settings = { ...DEFAULT_SETTINGS };
+    }
+}
+
+function saveSettings() {
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+        /* storage unavailable (private mode etc.), carry on without saving */
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Station data: loaded from data/repeaters.js, copied into IndexedDB as a cache
+// ---------------------------------------------------------------------------
+
+function openCacheDb() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore(DB_STORE);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function writeCache(stations) {
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, "readwrite");
+        tx.objectStore(DB_STORE).put(stations, DB_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function readCache() {
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+        const request = db.transaction(DB_STORE).objectStore(DB_STORE).get(DB_KEY);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// Reads data/repeaters.json (named fields) and converts each record to the array form used below.
+// This needs the page served over http(s); opened straight from disk, browsers block it.
+async function loadJsonStations() {
+    // Browsers block fetch() on file:// pages, so skip straight to data/repeaters.js
+    if (location.protocol === "file:") return null;
+    try {
+        const response = await fetch("data/repeaters.json");
+        if (!response.ok) return null;
+        const records = await response.json();
+        const keys = Object.keys(FIELD).sort((a, b) => FIELD[a] - FIELD[b]);
+        return records.map((record) => keys.map((key) => (record[key] === undefined ? null : record[key])));
+    } catch (error) {
+        return null;
+    }
+}
+
+async function loadStations() {
+    const fromJson = await loadJsonStations();
+    if (fromJson && fromJson.length) {
+        writeCache(fromJson).catch(() => {});
+        return { stations: fromJson, source: "data/repeaters.json" };
+    }
+    if (Array.isArray(window.REPEATER_DATA) && window.REPEATER_DATA.length) {
+        writeCache(window.REPEATER_DATA).catch(() => {});
+        return { stations: window.REPEATER_DATA, source: "data folder" };
+    }
+    try {
+        const cached = await readCache();
+        if (cached && cached.length) return { stations: cached, source: "browser cache" };
+    } catch (error) {
+        /* no cache available */
+    }
+    return { stations: [], source: "none" };
+}
+
+// ---------------------------------------------------------------------------
+// Map setup
+// ---------------------------------------------------------------------------
+
+let stations = [];
+let userPosition = null; // [lat, lon]
+let statusMessage = "";
+let userDot = null;
+let accuracyCircle = null;
+let geolocationWatchId = null;
+let firstFixPending = true;
+let locationCandidates = [];
+let candidateSource = "";
+let heading = null; // degrees clockwise from north, from the phone compass
+let headingMarker = null;
+
+const map = L.map("map", {
+    preferCanvas: true,
+    rotate: true, // leaflet-rotate plugin options
+    bearing: 0,
+    touchRotate: true, // two-finger twist on a phone
+    shiftKeyRotate: true, // Shift + drag on a computer
+    rotateControl: false,
+}).setView([-26, 134], 4);
+// If the plugin failed to load, the map still works but can't rotate
+const rotationSupported = typeof map.setBearing === "function";
+const currentBearing = () => (rotationSupported ? map.getBearing() : 0);
+const stationLayer = L.layerGroup().addTo(map);
+const lineLayer = L.layerGroup().addTo(map);
+
+const esriTiles = (service) =>
+    `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/{z}/{y}/{x}`;
+
+const BASE_MAPS = {
+    "Streets (Esri)": L.tileLayer(esriTiles("World_Street_Map"), { maxZoom: 19, attribution: "Tiles &copy; Esri" }),
+    "Streets (CARTO)": L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+        subdomains: "abcd", maxZoom: 19, attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+    }),
+    "Satellite (Esri)": L.tileLayer(esriTiles("World_Imagery"), { maxZoom: 19, attribution: "Tiles &copy; Esri" }),
+    OpenStreetMap: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    }),
+};
+
+let tileErrorCount = 0;
+Object.values(BASE_MAPS).forEach((layer) =>
+    layer.on("tileerror", () => {
+        if (++tileErrorCount === 6) {
+            el("tilemsg").textContent =
+                "Map tiles aren’t loading. Try another map style (top right of the map), or open the file in your normal browser.";
+        }
+    })
+);
+
+// ---------------------------------------------------------------------------
+// Compass: visual in the map corner plus a north-lock / follow-phone toggle
+// ---------------------------------------------------------------------------
+
+const ROTATE_STEP_DEGREES = 15;
+
+function compassSvg() {
+    let ticks = "";
+    for (let degrees = 0; degrees < 360; degrees += 10) {
+        const isCardinal = degrees % 90 === 0;
+        const length = isCardinal ? 9 : degrees % 30 === 0 ? 6 : 3.5;
+        ticks += `<line x1="50" y1="6" x2="50" y2="${6 + length}" stroke="#17231f" stroke-width="${isCardinal ? 2 : 1}" transform="rotate(${degrees} 50 50)"/>`;
+    }
+    const letter = (text, x, y, colour) =>
+        `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="700" fill="${colour}">${text}</text>`;
+    return (
+        '<svg viewBox="0 0 100 100" width="92" height="92" role="img" aria-label="Compass. Tap to point the map north.">' +
+        '<defs><radialGradient id="compassFace" cx="50%" cy="40%" r="65%">' +
+        '<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d5e0da"/></radialGradient></defs>' +
+        '<circle cx="50" cy="50" r="48" fill="url(#compassFace)" stroke="#17231f" stroke-width="2.5"/>' +
+        '<g id="compassRose">' +
+        '<circle cx="50" cy="50" r="44" fill="none" stroke="#9fb1a9" stroke-width="1"/>' +
+        ticks +
+        letter("N", 50, 25, "#b3261e") + letter("E", 75, 50, "#17231f") +
+        letter("S", 50, 75, "#17231f") + letter("W", 25, 50, "#17231f") +
+        '<polygon points="50,32 57,50 43,50" fill="#b3261e"/>' +
+        '<polygon points="50,68 57,50 43,50" fill="#5a6a64"/>' +
+        '<circle cx="50" cy="50" r="3.5" fill="#fff" stroke="#17231f" stroke-width="1.5"/>' +
+        "</g>" +
+        '<polygon points="50,1 44,11 56,11" fill="#1a73e8"/>' + // fixed marker: the top of your screen
+        "</svg>"
+    );
+}
+
+const CompassControl = L.Control.extend({
+    options: { position: "bottomright" },
+    onAdd() {
+        const box = L.DomUtil.create("div", "compass");
+        box.innerHTML =
+            compassSvg() +
+            '<div class="compass-turn"' + (rotationSupported ? "" : " hidden") + ">" +
+            '<button type="button" id="compassLeft" aria-label="Rotate map left">&#10226;</button>' +
+            '<button type="button" id="compassRight" aria-label="Rotate map right">&#10227;</button></div>' +
+            '<button type="button" id="compassBtn"></button>';
+        L.DomEvent.disableClickPropagation(box);
+        return box;
+    },
+});
+new CompassControl().addTo(map);
+
+function updateCompass() {
+    const following = settings.compassMode === "follow";
+    // The rose turns so "N" always points at true north, whatever way the map is turned
+    let roseAngle = 0;
+    if (rotationSupported) roseAngle = -currentBearing();
+    else if (following && heading != null) roseAngle = -heading;
+    el("compassRose").setAttribute("transform", `rotate(${roseAngle} 50 50)`);
+    el("compassBtn").textContent = following ? "Following compass" : "North locked";
+    el("compassBtn").setAttribute("aria-pressed", following);
+    updateHeadingMarker();
+}
+
+function setMapBearing(degrees) {
+    if (rotationSupported) map.setBearing(((degrees % 360) + 360) % 360);
+}
+
+// Manual rotation hands control back to you, so it switches off compass-following
+function rotateMapBy(degrees) {
+    if (!rotationSupported) return;
+    if (settings.compassMode === "follow") {
+        settings.compassMode = "north";
+        stopCompass();
+        saveSettings();
+    }
+    setMapBearing(currentBearing() + degrees);
+}
+
+function pointMapNorth() {
+    if (settings.compassMode === "follow") {
+        settings.compassMode = "north";
+        stopCompass();
+        saveSettings();
+    }
+    setMapBearing(0);
+    updateCompass();
+}
+
+function updateHeadingMarker() {
+    const show = settings.compassMode === "follow" && heading != null && userPosition;
+    if (!show) {
+        if (headingMarker) {
+            headingMarker.remove();
+            headingMarker = null;
+        }
+        return;
+    }
+    if (!headingMarker) {
+        const icon = L.divIcon({
+            className: "heading-icon",
+            html: '<div class="heading-arrow"></div>',
+            iconSize: [44, 44],
+            iconAnchor: [22, 22],
+        });
+        headingMarker = L.marker(userPosition, { icon, interactive: false, keyboard: false }).addTo(map);
+    }
+    headingMarker.setLatLng(userPosition);
+    headingMarker.getElement().firstChild.style.transform = `rotate(${heading - currentBearing()}deg)`;
+}
+
+function handleOrientation(event) {
+    // iOS gives webkitCompassHeading; Android gives an absolute alpha (counter-clockwise)
+    let value = event.webkitCompassHeading;
+    if (value == null && (event.absolute || event.type === "deviceorientationabsolute") && event.alpha != null) {
+        value = 360 - event.alpha;
+    }
+    if (value == null || Number.isNaN(value)) return;
+    heading = value;
+    if (settings.compassMode === "follow" && rotationSupported) {
+        const difference = Math.abs(((value - currentBearing() + 540) % 360) - 180);
+        if (difference > 2) setMapBearing(value); // ignore sensor jitter
+    }
+    updateCompass();
+}
+
+async function startCompass() {
+    if (typeof DeviceOrientationEvent === "undefined") {
+        statusMessage = "This device or browser has no compass sensor.";
+        return false;
+    }
+    if (typeof DeviceOrientationEvent.requestPermission === "function") {
+        // iOS Safari: must be asked from a tap, and needs a secure (https) page
+        const answer = await DeviceOrientationEvent.requestPermission();
+        if (answer !== "granted") {
+            statusMessage = "Compass permission was denied.";
+            return false;
+        }
+    }
+    window.addEventListener("deviceorientationabsolute", handleOrientation);
+    window.addEventListener("deviceorientation", handleOrientation);
+    return true;
+}
+
+function stopCompass() {
+    window.removeEventListener("deviceorientationabsolute", handleOrientation);
+    window.removeEventListener("deviceorientation", handleOrientation);
+    heading = null;
+}
+
+async function toggleCompassMode() {
+    if (settings.compassMode === "follow") {
+        settings.compassMode = "north";
+        stopCompass();
+        setMapBearing(0);
+    } else {
+        try {
+            settings.compassMode = (await startCompass()) ? "follow" : "north";
+        } catch (error) {
+            settings.compassMode = "north";
+            statusMessage = "Couldn’t start the compass: " + error.message;
+        }
+    }
+    saveSettings();
+    updateCompass();
+    drawStations(false);
+}
+
+// ---------------------------------------------------------------------------
+// Station filtering, markers and popups
+// ---------------------------------------------------------------------------
+
+function filteredStations() {
+    const text = settings.filterText.trim().toLowerCase();
+    return stations.filter(
+        (s) =>
+            hasPosition(s) &&
+            (settings.radioType === "all" || s[FIELD.radioType] === settings.radioType) &&
+            (settings.state === "All" || s[FIELD.state] === settings.state) &&
+            (!settings.channel || s[FIELD.channel] == settings.channel) &&
+            (!text || `${s[FIELD.siteName]} ${s[FIELD.callSign]} ${s[FIELD.postcode]}`.toLowerCase().includes(text))
+    );
+}
+
+function popupHtml(s) {
+    const row = (label, value) => (value === "" || value == null ? "" : `<dt>${label}</dt><dd>${value}</dd>`);
+    const cb = isCb(s);
+
+    const frequencyRows = cb
+        ? row("RX (you listen)", `ch ${s[FIELD.channel]} &middot; ${mhz(s[FIELD.outputMhz])}`) +
+          row("TX (you transmit)", `ch ${cbTxChannel(s)} &middot; ${mhz(cbTxMhz(s))}`)
+        : row("Radio type", TYPE_LABEL[s[FIELD.radioType]]) +
+          row("Band", escapeHtml(s[FIELD.band])) +
+          row("Station transmits", mhz(s[FIELD.outputMhz])) +
+          row("Emission", escapeHtml(s[FIELD.emission])) +
+          row("Bandwidth", s[FIELD.bandwidthKhz] != null ? s[FIELD.bandwidthKhz] + " kHz" : "");
+
+    const distanceRow = userPosition
+        ? row("Distance from you", formatKm(distanceKm(userPosition, [s[FIELD.lat], s[FIELD.lon]])))
+        : "";
+    const polarisation = { V: "Vertical", H: "Horizontal" }[s[FIELD.polarisation]] || "";
+
+    return `<h2>${escapeHtml(s[FIELD.siteName] || "Site not recorded")}</h2>
+${isEmergency(s) ? '<p class="em">Emergency use only</p>' : ""}<dl>
+${row("State", s[FIELD.state])}${row("Postcode", escapeHtml(s[FIELD.postcode] || ""))}${distanceRow}
+${row("Call sign", escapeHtml(s[FIELD.callSign]))}${frequencyRows}
+${row("Power", s[FIELD.powerWatts] ? s[FIELD.powerWatts] + " W" : "")}
+${row("Antenna height", s[FIELD.antennaHeightM] != null ? s[FIELD.antennaHeightM] + " m" : "")}
+${row("Polarisation", polarisation)}${row("Licence", escapeHtml(s[FIELD.licenceNumber] || ""))}
+${row("Licence date", escapeHtml(s[FIELD.licenceDate] || ""))}${row("Antenna", escapeHtml(s[FIELD.antennaType] || ""))}
+</dl><p><a href="https://www.google.com/maps/dir/?api=1&destination=${s[FIELD.lat]},${s[FIELD.lon]}" target="_blank" rel="noopener">Directions</a></p>`;
+}
+
+function drawStations(fitToResults) {
+    stationLayer.clearLayers();
+    const shown = filteredStations();
+
+    shown.forEach((s) =>
+        L.circleMarker([s[FIELD.lat], s[FIELD.lon]], {
+            radius: isEmergency(s) ? 8 : 6,
+            color: "#fff",
+            weight: 1.5,
+            fillColor: isEmergency(s) ? EMERGENCY_COLOR : TYPE_COLOR[s[FIELD.radioType]],
+            fillOpacity: 0.9,
+        })
+            .bindPopup(() => popupHtml(s))
+            .addTo(stationLayer)
+    );
+
+    if (fitToResults && shown.length) {
+        map.fitBounds(L.latLngBounds(shown.map((s) => [s[FIELD.lat], s[FIELD.lon]])), {
+            padding: [30, 30],
+            maxZoom: 10,
+        });
+    }
+
+    const noun = settings.radioType === "cb" ? "repeater" : "station";
+    el("status").textContent =
+        statusMessage ||
+        `${shown.length} ${noun}${shown.length === 1 ? "" : "s"} shown` +
+            (settings.state === "All" ? "" : " in " + settings.state);
+}
+
+// ---------------------------------------------------------------------------
+// Filter buttons
+// ---------------------------------------------------------------------------
+
+function countByState() {
+    const counts = { All: 0 };
+    stations.forEach((s) => {
+        if (settings.radioType === "all" || s[FIELD.radioType] === settings.radioType) {
+            counts.All++;
+            counts[s[FIELD.state]] = (counts[s[FIELD.state]] || 0) + 1;
+        }
+    });
+    return counts;
+}
+
+function buildTypeButtons() {
+    const counts = { all: stations.length };
+    stations.forEach((s) => (counts[s[FIELD.radioType]] = (counts[s[FIELD.radioType]] || 0) + 1));
+    const options = [{ id: "all", label: "All types" }, ...RADIO_TYPES];
+    el("types").innerHTML = options
+        .map(
+            (t) =>
+                `<button data-type="${t.id}" aria-pressed="${t.id === settings.radioType}">${t.label}<b>${counts[t.id] || 0}</b></button>`
+        )
+        .join("");
+}
+
+function buildStateButtons() {
+    const counts = countByState();
+    el("states").innerHTML = ["All", ...STATE_ORDER.filter((s) => counts[s])]
+        .map((s) => `<button data-state="${s}" aria-pressed="${s === settings.state}">${s}<b>${counts[s]}</b></button>`)
+        .join("");
+}
+
+function buildChannelOptions() {
+    const channels = [...new Set(stations.map((s) => s[FIELD.channel]).filter((c) => c != null))].sort((a, b) => a - b);
+    el("ch").insertAdjacentHTML("beforeend", channels.map((c) => `<option value="${c}">Channel ${c}</option>`).join(""));
+}
+
+function applyRadioTypeToChannelFilter() {
+    const channelsApply = settings.radioType === "cb" || settings.radioType === "all";
+    el("ch").hidden = !channelsApply;
+    if (!channelsApply) {
+        el("ch").value = "";
+        settings.channel = "";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nearest stations: lines, labels and the collapsible list
+// ---------------------------------------------------------------------------
+
+function nearestStations() {
+    const wanted = settings.nearestCount === "all" ? Infinity : +settings.nearestCount;
+    return filteredStations()
+        .map((s) => ({ km: distanceKm(userPosition, [s[FIELD.lat], s[FIELD.lon]]), station: s }))
+        .sort((a, b) => a.km - b.km)
+        .slice(0, wanted);
+}
+
+function updateNearest() {
+    el("opts").hidden = !userPosition;
+    lineLayer.clearLayers();
+    if (!userPosition) {
+        el("near").innerHTML = "";
+        el("nearBox").hidden = true;
+        el("chartBox").hidden = true;
+        return;
+    }
+    el("nearBox").hidden = false;
+    el("chartBox").hidden = false;
+
+    const nearest = nearestStations();
+
+    if (settings.showLines) {
+        const labelled = nearest.length <= MAX_LABELLED_LINES;
+        nearest.forEach(({ km, station }) => {
+            const line = L.polyline([userPosition, [station[FIELD.lat], station[FIELD.lon]]], {
+                color: isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]],
+                weight: labelled ? 3 : 1.5,
+                opacity: labelled ? 0.85 : 0.5,
+                dashArray: "7 7",
+            }).addTo(lineLayer);
+
+            const labelParts = [];
+            if (labelled && settings.showDistanceLabels) labelParts.push(formatKm(km));
+            if (labelled && settings.showChannelLabels) {
+                labelParts.push(
+                    station[FIELD.channel] != null
+                        ? `RX ${station[FIELD.channel]} &middot; ${station[FIELD.outputMhz].toFixed(3)}<br>TX ${cbTxChannel(station)} &middot; ${cbTxMhz(station).toFixed(3)}`
+                        : `RX ${station[FIELD.outputMhz].toFixed(3)} MHz`
+                );
+            }
+            if (labelParts.length) {
+                line.bindTooltip(labelParts.join("<br>"), { permanent: true, direction: "center", className: "dist" });
+            }
+        });
+    }
+
+    el("nearSummary").textContent = `Nearest to you (${nearest.length})`;
+    el("near").innerHTML = nearest
+        .map(
+            ({ km, station }) =>
+                `<button data-index="${stations.indexOf(station)}">` +
+                `<span class="chb${isEmergency(station) ? " em" : ""}">${badgeText(station)}</span>` +
+                `<span>${escapeHtml(station[FIELD.siteName] || station[FIELD.callSign])}<br>` +
+                `<small>${station[FIELD.state]} &middot; ${frequencySummary(station)}</small></span>` +
+                `<span class="km">${formatKm(km)}</span></button>`
+        )
+        .join("");
+    renderDistanceChart(nearest);
+}
+
+// Horizontal bar chart of distance to the nearest stations, coloured by radio type
+function renderDistanceChart(nearest) {
+    const bars = nearest.slice(0, MAX_CHART_BARS);
+    const longest = Math.max(...bars.map((entry) => entry.km), 1);
+    el("chartSummary").textContent = `Distance chart (${bars.length})`;
+    el("distChart").innerHTML =
+        bars
+            .map(({ km, station }) => {
+                const colour = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+                const width = Math.max(2, (km / longest) * 100);
+                const label = escapeHtml(station[FIELD.siteName] || station[FIELD.callSign]);
+                return (
+                    `<div class="bar-row"><span class="bar-label"><b>${badgeText(station)}</b> ${label}</span>` +
+                    `<span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${colour}"></span></span>` +
+                    `<span class="bar-km">${formatKm(km)}</span></div>`
+                );
+            })
+            .join("") +
+        (nearest.length > bars.length ? `<p class="bar-note">Showing the nearest ${bars.length} of ${nearest.length}.</p>` : "");
+}
+
+// ---------------------------------------------------------------------------
+// User position: search by address, saved location, GPS
+// ---------------------------------------------------------------------------
+
+function setUserPosition(position, label, accuracyMetres) {
+    userPosition = position;
+    if (!userDot) {
+        userDot = L.circleMarker(position, {
+            radius: 9, color: "#fff", weight: 3, fillColor: "#1a73e8", fillOpacity: 1,
+        }).addTo(map);
+    } else {
+        userDot.setLatLng(position);
+    }
+    userDot.unbindTooltip();
+    userDot.bindTooltip(label);
+
+    if (accuracyMetres) {
+        if (!accuracyCircle) {
+            accuracyCircle = L.circle(position, { radius: accuracyMetres, color: "#1a73e8", weight: 1, fillOpacity: 0.1 }).addTo(map);
+        } else {
+            accuracyCircle.setLatLng(position).setRadius(accuracyMetres);
+        }
+    } else if (accuracyCircle) {
+        accuracyCircle.remove();
+        accuracyCircle = null;
+    }
+    updateHeadingMarker();
+}
+
+function rememberLocation(label, query) {
+    settings.location = { lat: userPosition[0], lon: userPosition[1], label, query: query || "" };
+    saveSettings();
+}
+
+function stopGps() {
+    if (geolocationWatchId != null) {
+        navigator.geolocation.clearWatch(geolocationWatchId);
+        geolocationWatchId = null;
+    }
+}
+
+function useCandidate(index) {
+    const candidate = locationCandidates[index];
+    const shortName = candidate.display_name.split(",").slice(0, 3).join(",");
+    setUserPosition([+candidate.lat, +candidate.lon], "Searching from " + shortName, 0);
+    rememberLocation(shortName, el("aq").value.trim());
+    statusMessage =
+        "Showing stations near " + shortName + "." +
+        (candidateSource === "local" ? " (Matched to a listed station site, because the online address lookup wasn’t available.)" : "");
+    map.setView(userPosition, 10);
+    drawStations(false);
+    updateNearest();
+}
+
+// Offline fallback: match a postcode or site name from the station list itself
+function localSearch(query) {
+    const cleaned = query
+        .toLowerCase()
+        .replace(/,/g, " ")
+        .replace(/\b(nsw|vic|qld|sa|wa|tas|nt|act|australia)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!cleaned) return [];
+    const located = stations.filter(hasPosition);
+
+    if (/^\d{4}$/.test(cleaned)) {
+        const matches = located.filter((s) => s[FIELD.postcode] === cleaned);
+        if (matches.length) {
+            return [{
+                lat: matches.reduce((sum, s) => sum + s[FIELD.lat], 0) / matches.length,
+                lon: matches.reduce((sum, s) => sum + s[FIELD.lon], 0) / matches.length,
+                display_name: "Postcode " + cleaned + ", " + matches[0][FIELD.state],
+            }];
+        }
+    }
+    const seen = new Set();
+    const results = [];
+    for (const s of located) {
+        if (s[FIELD.siteName].toLowerCase().includes(cleaned)) {
+            const key = s[FIELD.lat] + "," + s[FIELD.lon];
+            if (!seen.has(key)) {
+                seen.add(key);
+                results.push({ lat: s[FIELD.lat], lon: s[FIELD.lon], display_name: s[FIELD.siteName] + ", " + s[FIELD.state] });
+            }
+        }
+        if (results.length >= 5) break;
+    }
+    return results;
+}
+
+// Tries Photon, then Open-Meteo, then Nominatim, then the local station list
+async function geocode(query) {
+    try {
+        const response = await fetch(
+            "https://photon.komoot.io/api/?limit=6&lang=en&bbox=112,-44.5,154.5,-9&q=" + encodeURIComponent(query)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            const results = [];
+            (json.features || []).forEach((feature) => {
+                const p = feature.properties || {};
+                if (p.countrycode && p.countrycode !== "AU") return;
+                const parts = [
+                    p.name,
+                    [p.housenumber, p.street].filter(Boolean).join(" "),
+                    p.city || p.district,
+                    p.state,
+                    p.postcode,
+                ].filter(Boolean);
+                results.push({
+                    lat: feature.geometry.coordinates[1],
+                    lon: feature.geometry.coordinates[0],
+                    display_name: [...new Set(parts)].join(", "),
+                });
+            });
+            if (results.length) return [results, "online"];
+        }
+    } catch (error) { /* try the next service */ }
+
+    try {
+        const placeName = query
+            .replace(/,/g, " ")
+            .replace(/\b(nsw|vic|qld|sa|wa|tas|nt|act|australia)\b/gi, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        const response = await fetch(
+            "https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&country_code=AU&name=" +
+                encodeURIComponent(placeName)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            const results = (json.results || []).map((p) => ({
+                lat: p.latitude,
+                lon: p.longitude,
+                display_name: [p.name, p.admin1, (p.postcodes || [])[0]].filter(Boolean).join(", "),
+            }));
+            if (results.length) return [results, "online"];
+        }
+    } catch (error) { /* try the next service */ }
+
+    try {
+        const response = await fetch(
+            "https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=au&limit=5&q=" + encodeURIComponent(query)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            if (json.length) return [json, "online"];
+        }
+    } catch (error) { /* fall back to local data */ }
+
+    return [localSearch(query), "local"];
+}
+
+// Show the best match, with the other matches tucked into a collapsed section
+function renderAlternatives() {
+    if (!locationCandidates.length) {
+        el("alts").innerHTML = "";
+        return;
+    }
+    const button = (candidate, index) =>
+        `<button type="button" data-index="${index}">${escapeHtml(candidate.display_name)}</button>`;
+    const others = locationCandidates.slice(1);
+    el("alts").innerHTML =
+        button(locationCandidates[0], 0) +
+        (others.length
+            ? `<details class="more"><summary>${others.length} other match${others.length === 1 ? "" : "es"}</summary>` +
+              others.map((c, i) => button(c, i + 1)).join("") +
+              "</details>"
+            : "");
+}
+
+function clearUserPosition() {
+    stopGps();
+    [userDot, accuracyCircle].forEach((layer) => layer && layer.remove());
+    userDot = accuracyCircle = null;
+    userPosition = null;
+    statusMessage = "";
+    locationCandidates = [];
+    settings.location = null;
+    saveSettings();
+    renderAlternatives();
+    updateHeadingMarker();
+    updateNearest();
+    drawStations(false);
+}
+
+function startGps() {
+    if (!navigator.geolocation) {
+        statusMessage = "Location is not available in this browser. Enter a suburb above instead.";
+        return drawStations(false);
+    }
+    stopGps();
+    firstFixPending = true;
+    statusMessage = "Finding your location…";
+    locationCandidates = [];
+    renderAlternatives();
+    drawStations(false);
+
+    geolocationWatchId = navigator.geolocation.watchPosition(
+        (position) => {
+            statusMessage = "";
+            setUserPosition([position.coords.latitude, position.coords.longitude], "You are here", position.coords.accuracy);
+            rememberLocation("Your location", "");
+            if (firstFixPending) {
+                map.setView(userPosition, 9);
+                firstFixPending = false;
+            }
+            drawStations(false);
+            updateNearest();
+        },
+        (error) => {
+            statusMessage =
+                error.code === 1
+                    ? "Location permission was denied. Allow location for this page, or enter a suburb above."
+                    : "Couldn’t get your location. Check GPS or signal, or enter a suburb above.";
+            drawStations(false);
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 }
+    );
+}
+
+async function handleAddressSearch(event) {
+    event.preventDefault();
+    const query = el("aq").value.trim();
+    if (!query) return;
+    stopGps();
+    statusMessage = "Searching…";
+    locationCandidates = [];
+    renderAlternatives();
+    drawStations(false);
+    try {
+        const [results, source] = await geocode(query);
+        candidateSource = source;
+        if (!results.length) {
+            statusMessage = "No match found. Try the suburb and state (for example Alice Springs NT) or a 4-digit postcode.";
+            return drawStations(false);
+        }
+        locationCandidates = results;
+        useCandidate(0);
+        renderAlternatives();
+    } catch (error) {
+        statusMessage = "Search failed: " + (error && error.message ? error.message : "unknown error") + ". Check the browser console for details.";
+        drawStations(false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event wiring
+// ---------------------------------------------------------------------------
+
+function wireEvents() {
+    el("types").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        settings.radioType = button.dataset.type;
+        applyRadioTypeToChannelFilter();
+        if (settings.state !== "All" && !countByState()[settings.state]) settings.state = "All";
+        saveSettings();
+        buildTypeButtons();
+        buildStateButtons();
+        drawStations(true);
+        updateNearest();
+    };
+
+    el("states").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        settings.state = button.dataset.state;
+        saveSettings();
+        buildStateButtons();
+        drawStations(true);
+        updateNearest();
+    };
+
+    el("q").addEventListener("input", () => {
+        settings.filterText = el("q").value;
+        saveSettings();
+        drawStations(false);
+        updateNearest();
+    });
+    el("ch").addEventListener("input", () => {
+        settings.channel = el("ch").value;
+        saveSettings();
+        drawStations(false);
+        updateNearest();
+    });
+
+    el("addr").onsubmit = handleAddressSearch;
+    el("me").onclick = startGps;
+    el("aq").addEventListener("input", () => {
+        if (!el("aq").value.trim() && (userPosition || locationCandidates.length || statusMessage)) clearUserPosition();
+    });
+
+    el("alts").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        const index = +button.dataset.index;
+        el("aq").value = locationCandidates[index].display_name;
+        useCandidate(index);
+    };
+
+    // Display options
+    const optionInputs = {
+        olines: ["showLines", "checked"],
+        olabels: ["showDistanceLabels", "checked"],
+        ochan: ["showChannelLabels", "checked"],
+        ncount: ["nearestCount", "value"],
+    };
+    Object.entries(optionInputs).forEach(([id, [key, prop]]) =>
+        el(id).addEventListener("change", () => {
+            settings[key] = el(id)[prop];
+            saveSettings();
+            updateNearest();
+        })
+    );
+
+    el("near").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        const station = stations[+button.dataset.index];
+        map.setView([station[FIELD.lat], station[FIELD.lon]], Math.max(map.getZoom(), 11));
+        L.popup().setLatLng([station[FIELD.lat], station[FIELD.lon]]).setContent(popupHtml(station)).openOn(map);
+    };
+
+    el("compassBtn").onclick = toggleCompassMode;
+    el("compassLeft").onclick = () => rotateMapBy(-ROTATE_STEP_DEGREES);
+    el("compassRight").onclick = () => rotateMapBy(ROTATE_STEP_DEGREES);
+    el("compassRose").closest("svg").onclick = pointMapNorth;
+    map.on("rotate", updateCompass);
+    // A two-finger twist means you want to steer: stop the compass fighting your fingers
+    map.getContainer().addEventListener(
+        "touchstart",
+        (event) => {
+            if (event.touches.length >= 2 && settings.compassMode === "follow") {
+                settings.compassMode = "north";
+                stopCompass();
+                saveSettings();
+                updateCompass();
+            }
+        },
+        { passive: true }
+    );
+
+    map.on("baselayerchange", (event) => {
+        settings.baseMap = event.name;
+        saveSettings();
+    });
+    map.on("moveend", () => {
+        const centre = map.getCenter();
+        settings.view = { lat: centre.lat, lon: centre.lng, zoom: map.getZoom() };
+        saveSettings();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Start up
+// ---------------------------------------------------------------------------
+
+function applySettingsToControls() {
+    el("q").value = settings.filterText;
+    el("olines").checked = settings.showLines;
+    el("olabels").checked = settings.showDistanceLabels;
+    el("ochan").checked = settings.showChannelLabels;
+    el("ncount").value = settings.nearestCount;
+    el("ch").value = settings.channel;
+    applyRadioTypeToChannelFilter();
+}
+
+async function init() {
+    loadSettings();
+    const loaded = await loadStations();
+    stations = loaded.stations;
+    if (!stations.length) {
+        el("status").textContent =
+            "No station data found. Keep the data folder (data/repeaters.js) next to this file, or open the page once with it present so it can be cached.";
+        return;
+    }
+
+    // Restore the saved map style
+    Object.values(BASE_MAPS).forEach((layer) => map.hasLayer(layer) && map.removeLayer(layer));
+    (BASE_MAPS[settings.baseMap] || BASE_MAPS["Streets (Esri)"]).addTo(map);
+    L.control.layers(BASE_MAPS, null, { position: "topright" }).addTo(map);
+
+    buildChannelOptions();
+    if (settings.state !== "All" && !countByState()[settings.state]) settings.state = "All";
+    applySettingsToControls();
+    buildTypeButtons();
+    buildStateButtons();
+
+    el("legend").innerHTML =
+        RADIO_TYPES.map((t) => `<i style="background:${t.color}"></i>${t.label}`).join("") +
+        `<i style="background:${EMERGENCY_COLOR}"></i>Emergency (CB ch 5)`;
+    el("datasource").textContent = "Station data loaded from the " + loaded.source + ".";
+
+    wireEvents();
+
+    // Restore the last search location and map view
+    const hadSavedView = !!settings.view;
+    if (hadSavedView) map.setView([settings.view.lat, settings.view.lon], settings.view.zoom);
+    if (settings.location) {
+        const saved = settings.location;
+        el("aq").value = saved.query || (saved.label !== "Your location" ? saved.label : "");
+        setUserPosition([saved.lat, saved.lon], saved.label === "Your location" ? "Last known location" : "Searching from " + saved.label, 0);
+        statusMessage = "Showing stations near " + saved.label + " (saved from last time).";
+    }
+
+    drawStations(!hadSavedView);
+    updateNearest();
+    updateCompass();
+
+    if (settings.compassMode === "follow") {
+        // Browsers (iOS especially) need a tap to start the compass again
+        settings.compassMode = "north";
+        updateCompass();
+    }
+}
+
+init();
+        </script>
+    </body>
+</html>

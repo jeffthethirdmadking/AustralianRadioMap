@@ -651,3 +651,44 @@ details.box {
     font-size: 0.85rem;
     margin: 4px 0 0;
 }
+
+/* ---- Settings section (API keys and, later, other options) ---- */
+.settings-body h2 {
+    font-size: 1rem;
+    margin: 10px 0 4px;
+}
+.settings-note {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin: 0 0 10px;
+}
+.settings-body .field {
+    display: grid;
+    grid-template-columns: minmax(110px, 30%) minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.settings-body .field input {
+    width: 100%;
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+}
+.settings-body button {
+    padding: 7px 12px;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+}
+@media (max-width: 600px) {
+    .settings-body .field {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
+}

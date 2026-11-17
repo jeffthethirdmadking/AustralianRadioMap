@@ -65,6 +65,19 @@
                 <summary id="chartSummary">Distance chart</summary>
                 <div id="distChart" class="dist-chart"></div>
             </details>
+            <details class="box" id="settingsBox">
+                <summary>Settings</summary>
+                <div class="settings-body">
+                    <h2>Map API keys</h2>
+                    <p class="settings-note">
+                        Optional, and not used by the map yet. Keys are saved only in this browser. Anything in a web
+                        page can be read by whoever opens it, so restrict each key to this site&rsquo;s address in the
+                        provider&rsquo;s dashboard.
+                    </p>
+                    <div id="apiKeyFields"></div>
+                    <button type="button" id="clearKeys">Clear saved keys</button>
+                </div>
+            </details>
             <p class="note">
                 Licensed entries from the ACMA register, not live status. Channel 5 repeaters are for emergencies only.
                 Distances are straight-line, not driving distance. For UHF CB, RX is the channel you listen on and TX
@@ -164,6 +177,7 @@ const DEFAULT_SETTINGS = {
     showDistanceLabels: true,
     showChannelLabels: true,
     baseMap: "Streets (Esri)",
+    apiKeys: {}, // { providerId: key }, filled in from the Settings section
     compassMode: "north", // "north" or "follow"
     location: null, // { lat, lon, label, query }
     view: null, // { lat, lon, zoom }
@@ -279,58 +293,54 @@ async function readCache() {
     });
 }
 
-// Reads data/repeaters.json (named fields) and converts each record to the array form used below.
-// This needs the page served over http(s); opened straight from disk, browsers block it.
-async function loadJsonStations() {
-    return null;
-
-    // Browsers block fetch() on file:// pages, so skip straight to data/repeaters.js
-    if (location.protocol === "file:") return null;
-    try {
-        const response = await fetch("data/repeaters.json");
-        if (!response.ok) return null;
-        const records = await response.json();
-        const keys = Object.keys(FIELD).sort((a, b) => FIELD[a] - FIELD[b]);
-        return records.map((record) => keys.map((key) => (record[key] === undefined ? null : record[key])));
-    } catch (error) {
-        return null;
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Data folder: every .json file in data/ becomes one category
+// Data: data/repeaters.json (written by update_data.py), one category per TYPE
 // ---------------------------------------------------------------------------
 
 const DATA_DIR = "./data/";
+const MAIN_DATA_FILE = "repeaters.json";
+const CB_LABEL_PATTERN = /cbrs|uhf[\s_-]*cb/i;
+const isDataFile = (name) => /\.json$/i.test(name) && name.toLowerCase() !== "manifest.json";
 const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
+
+// Fetches one JSON file from the data folder. Returns the array of records, or null.
+async function fetchRecords(file) {
+    try {
+        const response = await fetch(DATA_DIR + encodePath(file));
+        if (!response.ok) return null;
+        const data = await response.json();
+        return Array.isArray(data) ? data : null;
+    } catch (error) {
+        return null; // one bad file shouldn't stop the others
+    }
+}
+
+// Fallback for older layouts (one JSON file per type): read the folder's directory listing.
+// Static hosts like GitHub Pages don't offer a listing, which is fine, repeaters.json is tried first.
 async function listDataFiles() {
-    if (location.protocol === "file:") return []; // browsers block fetch() on file:// pages
     try {
         const response = await fetch(DATA_DIR);
-        if (response.ok) {
-            const html = await response.text();
-            const doc = new DOMParser().parseFromString(html, "text/html");
-            const names = [...doc.querySelectorAll("a[href]")]
-                .map((a) => a.getAttribute("href").split(/[?#]/)[0].split("/").pop())
-                .map((name) => {
-                    try {
-                        return decodeURIComponent(name);
-                    } catch (error) {
-                        return name;
-                    }
-                })
-                .filter((name) => name && isCategoryFile(name));
-            return [...new Set(names)];
-        }
+        if (!response.ok) return [];
+        const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+        const names = [...doc.querySelectorAll("a[href]")]
+            .map((a) => a.getAttribute("href").split(/[?#]/)[0].split("/").pop())
+            .map((name) => {
+                try {
+                    return decodeURIComponent(name);
+                } catch (error) {
+                    return name;
+                }
+            })
+            .filter((name) => name && isDataFile(name));
+        return [...new Set(names)];
     } catch (error) {
-        /* directory listing not available */
+        return [];
     }
-    return [];
 }
 
 // UHF CB repeater outputs (what you listen on). Channels 1-8 are on the 25 kHz grid from
-// 476.425 MHz; channels 41-48 are the 12.5 kHz-offset block from 476.4375 MHz. The ACMA
-// data has no channel numbers, so they are worked out from the frequency here.
+// 476.425 MHz; channels 41-48 are the 12.5 kHz-offset block from 476.4375 MHz. Used only when
+// a record has no CB_CHANNEL of its own.
 function cbChannelFromMhz(mhzValue) {
     const slot = (start) => {
         const n = (mhzValue - start) / 0.025;
@@ -355,13 +365,17 @@ function powerInWatts(record) {
     return unit === "w" ? power : unit === "kw" ? power * 1000 : null;
 }
 
-// Converts one enriched record (from extract_device_details.py) to the array form used by the page
+// Converts one record from data/repeaters.json to the array form used by the page.
+// The extra fields written by update_data.py (CB_CHANNEL, POWER_WATTS, BAND) are used when present.
 function stationFromRecord(record, typeId, cbType) {
     const site = record.site || {};
     const frequency = toNumber(record.FREQUENCY_MHZ) ?? (toNumber(record.FREQUENCY) != null ? toNumber(record.FREQUENCY) / 1e6 : null);
     if (frequency == null) return null;
     const antenna = record.antenna || {};
     const receiveSide = (record.same_station_devices || []).find((d) => d.DEVICE_TYPE === "R");
+    const receiveMhz = receiveSide
+        ? toNumber(receiveSide.FREQUENCY_MHZ) ?? (toNumber(receiveSide.FREQUENCY) != null ? toNumber(receiveSide.FREQUENCY) / 1e6 : null)
+        : null;
     const stateName = record.STATE && record.STATE !== "NO_SITE" ? record.STATE : site.STATE || "Unknown";
     const bandwidthHz = toNumber(record.BANDWIDTH);
 
@@ -373,9 +387,9 @@ function stationFromRecord(record, typeId, cbType) {
     s[FIELD.lon] = toNumber(site.LONGITUDE);
     s[FIELD.callSign] = record.CALL_SIGN || "";
     s[FIELD.licenceNumber] = record.LICENCE_NO || "";
-    s[FIELD.channel] = cbType ? cbChannelFromMhz(frequency) : null;
+    s[FIELD.channel] = cbType ? toNumber(record.CB_CHANNEL) ?? cbChannelFromMhz(frequency) : null;
     s[FIELD.outputMhz] = frequency;
-    s[FIELD.powerWatts] = powerInWatts(record);
+    s[FIELD.powerWatts] = toNumber(record.POWER_WATTS) ?? powerInWatts(record);
     s[FIELD.antennaHeightM] = toNumber(record.HEIGHT);
     s[FIELD.polarisation] = record.POLARISATION || "";
     s[FIELD.licenceDate] = (record.licence && record.licence.DATE_ISSUED) || record.AUTHORISATION_DATE || "";
@@ -383,64 +397,78 @@ function stationFromRecord(record, typeId, cbType) {
     s[FIELD.radioType] = typeId;
     s[FIELD.emission] = (record.EMISSION || "").trim();
     s[FIELD.bandwidthKhz] = bandwidthHz != null ? bandwidthHz / 1000 : null;
-    s[FIELD.band] = record.SERVICE_NAME || record.SUBSERVICE_NAME || "";
-    s[FIELD.inputMhz] = receiveSide ? toNumber(receiveSide.FREQUENCY_MHZ) ?? (toNumber(receiveSide.FREQUENCY) != null ? toNumber(receiveSide.FREQUENCY) / 1e6 : null) : null;
+    s[FIELD.band] = record.BAND || record.SERVICE_NAME || record.SUBSERVICE_NAME || "";
+    s[FIELD.inputMhz] = receiveMhz;
     s[FIELD.licensee] = (record.client && record.client.LICENCEE) || "";
     return s;
 }
 
-async function loadDataFolder() {
-    const files = await listDataFiles();
-    if (!files.length) return null;
-    el("status").textContent = `Loading ${files.length} data file${files.length === 1 ? "" : "s"}...`;
+// Sorts records into categories. Records from update_data.py carry a RADIO_TYPE, which keeps the
+// familiar labels (UHF CB, Marine VHF, Marine HF, Amateur, Aeronautical). Anything without one
+// falls back to its TYPE field, then to the file name.
+const KNOWN_TYPES = Object.fromEntries(DEFAULT_RADIO_TYPES.map((t, index) => [t.id, { ...t, order: index }]));
 
-    const loaded = await Promise.all(
-        files.map(async (file) => {
-            try {
-                const response = await fetch(DATA_DIR + encodePath(file));
-                if (!response.ok) return null;
-                const data = await response.json();
-                return { file, records: Array.isArray(data) ? data : [] };
-            } catch (error) {
-                return null; // one bad file shouldn't stop the others
-            }
-        })
-    );
+function addRecordsToCategories(categories, records, file) {
+    const fileLabel = file.split("/").pop().replace(/\.json$/i, "");
+    const groups = new Map(); // category id -> { label, known, records }
+    records.forEach((record) => {
+        const known = KNOWN_TYPES[record.RADIO_TYPE];
+        const label = known
+            ? known.label
+            : String(record.TYPE || fileLabel).replace(/_/g, " ").replace(/\s+/g, " ").trim() || fileLabel;
+        const id = known ? known.id : label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "other";
+        if (!groups.has(id)) groups.set(id, { label, known, records: [] });
+        groups.get(id).records.push(record);
+    });
 
-    // One category per file name. The same name in different folders (e.g. NSW/CBRS_Repeater.json
-    // and VIC/CBRS_Repeater.json) is merged into one category.
-    const categories = new Map(); // id -> { id, label, cb, color, stations }
-    let filesRead = 0;
-    loaded.filter(Boolean).forEach(({ file, records }) => {
-        filesRead++;
-        const base = file.split("/").pop().replace(/\.json$/i, "");
-        const label = base.replace(/_/g, " ").replace(/\s+/g, " ").trim() || base;
-        const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "other";
+    groups.forEach(({ label, known, records: groupRecords }, id) => {
         if (!categories.has(id)) {
-            categories.set(id, { id, label, cb: /cbrs|uhf[\s_-]*cb/i.test(label), color: null, stations: [] });
+            const isCbType = known ? !!known.cb : CB_LABEL_PATTERN.test(label);
+            categories.set(id, { id, label, cb: isCbType, color: known ? known.color : null, order: known ? known.order : 99, stations: [] });
         }
         const category = categories.get(id);
-        // Repeaters and base stations have a transmit and a receive row; show each station once, by its transmit row
-        const hasTransmit = records.some((r) => r.DEVICE_TYPE === "T");
-        records.forEach((record) => {
+        // Repeaters have a transmit and a receive row; show each station once, by its transmit row
+        const hasTransmit = groupRecords.some((r) => r.DEVICE_TYPE === "T");
+        groupRecords.forEach((record) => {
             if (hasTransmit && record.DEVICE_TYPE !== "T") return;
             const station = stationFromRecord(record, id, category.cb);
             if (station) category.stations.push(station);
         });
     });
+}
+
+async function loadDataFolder() {
+    if (location.protocol === "file:") return null; // browsers block fetch() on file:// pages
+
+    el("status").textContent = "Loading station data...";
+    let sources = [];
+    const main = await fetchRecords(MAIN_DATA_FILE);
+    if (main) {
+        sources = [{ file: MAIN_DATA_FILE, records: main }];
+    } else {
+        const files = await listDataFiles();
+        const loaded = await Promise.all(files.map(async (file) => ({ file, records: await fetchRecords(file) })));
+        sources = loaded.filter((entry) => entry.records);
+    }
+    if (!sources.length) return null;
+
+    const categories = new Map(); // id -> { id, label, cb, color, stations }
+    sources.forEach(({ file, records }) => addRecordsToCategories(categories, records, file));
 
     const types = [...categories.values()]
         .filter((c) => c.stations.length)
-        .sort((a, b) => (b.cb - a.cb) || a.label.localeCompare(b.label));
+        .sort((a, b) => (a.order - b.order) || (b.cb - a.cb) || a.label.localeCompare(b.label));
     let paletteIndex = 0;
-    types.forEach((t) => (t.color = t.cb ? CB_COLOR : CATEGORY_PALETTE[paletteIndex++ % CATEGORY_PALETTE.length]));
+    types.forEach((t) => {
+        if (!t.color) t.color = t.cb ? CB_COLOR : CATEGORY_PALETTE[paletteIndex++ % CATEGORY_PALETTE.length];
+    });
 
     const stationList = types.flatMap((t) => t.stations);
     if (!stationList.length) return null;
     return {
         stations: stationList,
         types: types.map(({ id, label, color, cb }) => ({ id, label, color, cb })),
-        source: `data folder (${filesRead} JSON file${filesRead === 1 ? "" : "s"})`,
+        source: sources.length === 1 ? `data/${sources[0].file}` : `data folder (${sources.length} JSON files)`,
     };
 }
 
@@ -449,11 +477,6 @@ async function loadStations() {
     if (fromFolder) {
         writeCache(fromFolder.stations, fromFolder.types).catch(() => {});
         return fromFolder;
-    }
-    const fromJson = await loadJsonStations();
-    if (fromJson && fromJson.length) {
-        writeCache(fromJson, DEFAULT_RADIO_TYPES).catch(() => {});
-        return { stations: fromJson, types: DEFAULT_RADIO_TYPES, source: "data/repeaters.json" };
     }
     if (Array.isArray(window.REPEATER_DATA) && window.REPEATER_DATA.length) {
         writeCache(window.REPEATER_DATA, DEFAULT_RADIO_TYPES).catch(() => {});
@@ -814,24 +837,140 @@ ${row("Licence date", escapeHtml(s[FIELD.licenceDate] || ""))}${row("Antenna", e
 </dl><p><a href="https://www.google.com/maps/dir/?api=1&destination=${s[FIELD.lat]},${s[FIELD.lon]}" target="_blank" rel="noopener">Directions</a></p>`;
 }
 
+// ---------------------------------------------------------------------------
+// Station dots. One canvas, drawn in screen coordinates and repainted on every frame the
+// map moves, so the dots stay locked to the tiles while pinching, panning and rotating.
+// (Thousands of separate Leaflet markers redraw only when a gesture ends, which is why
+// they used to lag behind the map on a phone.)
+// ---------------------------------------------------------------------------
+
+const TAU = Math.PI * 2;
+const stationCanvas = document.createElement("canvas");
+stationCanvas.className = "station-canvas";
+stationCanvas.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:401;transform-origin:0 0;";
+map.getContainer().appendChild(stationCanvas);
+
+let visibleStations = []; // stations passing the current filters
+let drawnPoints = []; // { x, y, station } for the dots painted last frame, used for taps
+let repaintQueued = false;
+
+function requestStationRepaint() {
+    if (repaintQueued) return;
+    repaintQueued = true;
+    requestAnimationFrame(paintStations);
+}
+
+// The open popup's box in screen coordinates, so dots don't paint over it
+function openPopupBox() {
+    const popup = map._popup;
+    const node = popup && popup.isOpen() && popup._container;
+    if (!node) return null;
+    const outer = map.getContainer().getBoundingClientRect();
+    const box = node.getBoundingClientRect();
+    return { left: box.left - outer.left, right: box.right - outer.left, top: box.top - outer.top, bottom: box.bottom - outer.top };
+}
+
+function paintStations() {
+    repaintQueued = false;
+    const size = map.getSize();
+    const ratio = window.devicePixelRatio || 1;
+    const pixelWidth = Math.round(size.x * ratio);
+    const pixelHeight = Math.round(size.y * ratio);
+    if (stationCanvas.width !== pixelWidth || stationCanvas.height !== pixelHeight) {
+        stationCanvas.width = pixelWidth;
+        stationCanvas.height = pixelHeight;
+        stationCanvas.style.width = size.x + "px";
+        stationCanvas.style.height = size.y + "px";
+    }
+    stationCanvas.style.transition = "none";
+    stationCanvas.style.transform = "";
+    stationCanvas.style.visibility = "visible";
+
+    const ctx = stationCanvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, size.x, size.y);
+    drawnPoints = [];
+
+    const popupBox = openPopupBox();
+    const batches = new Map(); // "colour|radius" -> points, so each colour is one fill
+    for (const station of visibleStations) {
+        const point = map.latLngToContainerPoint([station[FIELD.lat], station[FIELD.lon]]);
+        if (point.x < -12 || point.y < -12 || point.x > size.x + 12 || point.y > size.y + 12) continue;
+        if (popupBox && point.x > popupBox.left && point.x < popupBox.right && point.y > popupBox.top && point.y < popupBox.bottom) continue;
+        const emergency = isEmergency(station);
+        const key = (emergency ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]]) + "|" + (emergency ? 8 : 6);
+        if (!batches.has(key)) batches.set(key, []);
+        batches.get(key).push(point);
+        drawnPoints.push({ x: point.x, y: point.y, station });
+    }
+
+    batches.forEach((points, key) => {
+        const [colour, radiusText] = key.split("|");
+        const radius = +radiusText;
+        ctx.fillStyle = "#fff"; // white ring
+        ctx.beginPath();
+        points.forEach((p) => {
+            ctx.moveTo(p.x + radius + 0.75, p.y);
+            ctx.arc(p.x, p.y, radius + 0.75, 0, TAU);
+        });
+        ctx.fill();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = colour;
+        ctx.beginPath();
+        points.forEach((p) => {
+            ctx.moveTo(p.x + radius - 0.75, p.y);
+            ctx.arc(p.x, p.y, radius - 0.75, 0, TAU);
+        });
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    });
+}
+
+// Animated zooms (buttons, double tap, the snap at the end of a pinch): slide the canvas along
+// with the tiles. When the map is rotated the maths differs, so just hide the dots until it lands.
+map.on("zoomanim", (event) => {
+    if (rotationSupported && Math.abs(currentBearing()) > 0.01) {
+        stationCanvas.style.visibility = "hidden";
+        return;
+    }
+    const scale = map.getZoomScale(event.zoom);
+    const size = map.getSize();
+    const oldCentre = map.project(map.getCenter(), map.getZoom());
+    const newCentre = map.project(event.center, event.zoom);
+    const shiftX = (size.x / 2) * (1 - scale) + scale * oldCentre.x - newCentre.x;
+    const shiftY = (size.y / 2) * (1 - scale) + scale * oldCentre.y - newCentre.y;
+    stationCanvas.style.transition = "transform 0.25s cubic-bezier(0, 0, 0.25, 1)";
+    stationCanvas.style.transform = `translate(${shiftX}px, ${shiftY}px) scale(${scale})`;
+});
+map.on("move zoom zoomend moveend resize viewreset rotate popupopen popupclose", requestStationRepaint);
+
+// Tapping the map opens the nearest dot's popup (the dots are painted, so they have no click events)
+map.on("click", (event) => {
+    const tap = map.latLngToContainerPoint(event.latlng);
+    const reach = L.Browser.touch ? 20 : 12;
+    let best = null;
+    let bestDistance = reach * reach;
+    drawnPoints.forEach((dot) => {
+        const distance = (dot.x - tap.x) ** 2 + (dot.y - tap.y) ** 2;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = dot;
+        }
+    });
+    if (best) {
+        L.popup()
+            .setLatLng([best.station[FIELD.lat], best.station[FIELD.lon]])
+            .setContent(popupHtml(best.station))
+            .openOn(map);
+    }
+});
+
 function drawStations(fitToResults) {
-    stationLayer.clearLayers();
-    const shown = filteredStations();
+    visibleStations = filteredStations();
+    requestStationRepaint();
 
-    shown.forEach((s) =>
-        L.circleMarker([s[FIELD.lat], s[FIELD.lon]], {
-            radius: isEmergency(s) ? 8 : 6,
-            color: "#fff",
-            weight: 1.5,
-            fillColor: isEmergency(s) ? EMERGENCY_COLOR : TYPE_COLOR[s[FIELD.radioType]],
-            fillOpacity: 0.9,
-        })
-            .bindPopup(() => popupHtml(s))
-            .addTo(stationLayer)
-    );
-
-    if (fitToResults && shown.length) {
-        map.fitBounds(L.latLngBounds(shown.map((s) => [s[FIELD.lat], s[FIELD.lon]])), {
+    if (fitToResults && visibleStations.length) {
+        map.fitBounds(L.latLngBounds(visibleStations.map((s) => [s[FIELD.lat], s[FIELD.lon]])), {
             padding: [30, 30],
             maxZoom: 10,
         });
@@ -840,7 +979,7 @@ function drawStations(fitToResults) {
     const noun = typeIsCb(settings.radioType) ? "repeater" : "station";
     el("status").textContent =
         statusMessage ||
-        `${shown.length} ${noun}${shown.length === 1 ? "" : "s"} shown` +
+        `${visibleStations.length} ${noun}${visibleStations.length === 1 ? "" : "s"} shown` +
             (settings.state === "All" ? "" : " in " + settings.state);
 }
 
@@ -1341,6 +1480,39 @@ function wireEvents() {
 // Start up
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Settings section (collapsed by default). Everything typed here is saved straight away.
+// To add another key later, add a line to API_KEY_PROVIDERS.
+// ---------------------------------------------------------------------------
+
+const API_KEY_PROVIDERS = [
+    { id: "basemaps", label: "BaseMaps" }
+];
+
+// Other code asks for a key with getApiKey("maptiler"); it returns "" when none is saved
+const getApiKey = (providerId) => (settings.apiKeys && settings.apiKeys[providerId]) || "";
+
+function buildSettingsPanel() {
+    el("apiKeyFields").innerHTML = API_KEY_PROVIDERS.map(
+        (provider) =>
+            `<label class="field"><span>${escapeHtml(provider.label)}</span>` +
+            `<input type="password" data-provider="${provider.id}" value="${escapeHtml(getApiKey(provider.id))}" ` +
+            `autocomplete="off" spellcheck="false" /></label>`
+    ).join("");
+
+    el("apiKeyFields").addEventListener("input", (event) => {
+        const input = event.target.closest("input[data-provider]");
+        if (!input) return;
+        settings.apiKeys = { ...settings.apiKeys, [input.dataset.provider]: input.value.trim() };
+        saveSettings();
+    });
+    el("clearKeys").onclick = () => {
+        settings.apiKeys = {};
+        saveSettings();
+        el("apiKeyFields").querySelectorAll("input").forEach((input) => (input.value = ""));
+    };
+}
+
 function applySettingsToControls() {
     el("q").value = settings.filterText;
     el("olines").checked = settings.showLines;
@@ -1353,11 +1525,12 @@ function applySettingsToControls() {
 
 async function init() {
     loadSettings();
+    buildSettingsPanel();
     const loaded = await loadStations();
     stations = loaded.stations;
     if (!stations.length) {
         el("status").textContent =
-            "No station data found. Serve this page over http(s) with a data folder next to it holding your .json files and a manifest.json listing them (or data/repeaters.js), or open the page once with the data present so it can be cached.";
+            "No station data found. Serve this page over http(s) with data/repeaters.json next to it (run update_data.py to create it), or open the page once with the data present so it can be cached.";
         return;
     }
     setRadioTypes(loaded.types);

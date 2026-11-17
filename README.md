@@ -24,8 +24,7 @@ AustralianRadioMap/
 ├── style.css           all of the styling
 ├── update_data.py      downloads the ACMA data and builds the data files
 ├── data/
-│   ├── repeaters.json  station data (named fields), used when served over http(s)
-│   └── repeaters.js    the same data as arrays, used when opened straight from disk
+│   └── repeaters.json  all stations, one full ACMA-style record each (written by update_data.py)
 ├── cache/              downloaded ACMA zip (created by the script, not committed)
 ├── README.md
 ├── LICENSE
@@ -34,15 +33,15 @@ AustralianRadioMap/
  
 ## Running it
  
-**Opened from disk:** double-click `index.html`. Browsers block `fetch()` on `file://` pages, so the page falls back to `data/repeaters.js`.
+**The page must be served over http(s)** so it can read `data/repeaters.json`. Opening `index.html` straight from disk won't load the data, because browsers block `fetch()` on `file://` pages.
  
-**With a local server** (recommended, and needed to test location and compass on a phone):
+To run it locally (this is also needed to test location and the compass on a phone):
  
 ```
 python -m http.server 8000
 ```
  
-then open `http://localhost:8000`. Served this way, the page reads `data/repeaters.json`.
+then open `http://localhost:8000`. 
  
 **On GitHub Pages:** commit the whole folder (including `data/`), then in the repository go to *Settings → Pages* and publish from your branch. All paths are relative, so it works under an address like `username.github.io/AustralianRadioMap/`. Pages uses https, which phones require for location and for the iPhone compass.
  
@@ -60,9 +59,12 @@ python update_data.py --inspect    # list the CSV files and columns inside the z
 What it does:
  
 1. Downloads the ACMA's daily `spectra_rrl.zip` and caches it in `cache/`.
-2. Joins `device_details.csv`, `licence.csv` and `site.csv`, keeping transmitting stations on granted licences that have coordinates.
-3. Sorts each station into a radio type from its frequency and licence service wording. UHF CB repeaters are recognised by their output frequency (476.4125–476.6125 MHz).
-4. Writes `data/repeaters.json` and `data/repeaters.js`.
+2. Streams `device_details.csv` and keeps transmitting devices on granted licences whose site has coordinates.
+3. Sorts each device into a radio type from its frequency and licence service wording. UHF CB repeaters are the "CBRS Repeater" subservice, and the channel number is worked out from the output frequency (476.4125–476.6125 MHz).
+4. Adds everything linked to each device (site, licence, client, antenna, access area, licence conditions and the other devices on the same station), in the same layout as `split_device_details.py`.
+5. Writes **one** file, `data/repeaters.json`, sorted so each radio type is bundled together (cb, mvhf, mhf, ama, air), then by subservice, state and site name.
+Each record also gets four fields for the map: `RADIO_TYPE`, `BAND`, `POWER_WATTS` and `CB_CHANNEL`. Useful options: `--include-receivers` keeps receive-side rows, `--no-text` leaves out licence conditions (much smaller file), and `--no-pairs` skips `same_station_devices`. The full records make the file much larger than before, so `--no-text` is worth using for hosting.
+ 
 If the ACMA changes its column names, the script says which column is missing. Run `--inspect` to see the real names and adjust the `COLUMNS` block at the top of the script. The type rules are an approximation, so check the counts after a run.
  
 If the download fails with `getaddrinfo failed`, your computer could not look up the ACMA address (a network, VPN or DNS problem). Download the zip by hand from the ACMA page and use `--zip`.

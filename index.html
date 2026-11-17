@@ -93,7 +93,6 @@
         </main>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
-        <script src="data/repeaters.js"></script>
         <script>
 "use strict";
 
@@ -283,6 +282,8 @@ async function readCache() {
 // Reads data/repeaters.json (named fields) and converts each record to the array form used below.
 // This needs the page served over http(s); opened straight from disk, browsers block it.
 async function loadJsonStations() {
+    return null;
+
     // Browsers block fetch() on file:// pages, so skip straight to data/repeaters.js
     if (location.protocol === "file:") return null;
     try {
@@ -301,24 +302,9 @@ async function loadJsonStations() {
 // ---------------------------------------------------------------------------
 
 const DATA_DIR = "data/";
-const NOT_CATEGORY_FILES = new Set(["manifest.json", "repeaters.json"]);
-const isCategoryFile = (path) => /\.json$/i.test(path) && !NOT_CATEGORY_FILES.has(path.split("/").pop().toLowerCase());
 const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
-
-// A browser can't list a folder by itself, so look for data/manifest.json (a JSON array of
-// file names, made by make_manifest.py) and otherwise try the server's own directory listing.
 async function listDataFiles() {
     if (location.protocol === "file:") return []; // browsers block fetch() on file:// pages
-    try {
-        const response = await fetch(DATA_DIR + "manifest.json", { cache: "no-cache" });
-        if (response.ok) {
-            const manifest = await response.json();
-            const list = Array.isArray(manifest) ? manifest : manifest.files;
-            if (Array.isArray(list)) return list.map(String).filter(isCategoryFile);
-        }
-    } catch (error) {
-        /* no manifest, try the directory listing */
-    }
     try {
         const response = await fetch(DATA_DIR);
         if (response.ok) {
@@ -544,33 +530,76 @@ Object.values(BASE_MAPS).forEach((layer) =>
 
 const ROTATE_STEP_DEGREES = 15;
 
+
 function compassSvg() {
     let ticks = "";
+
     for (let degrees = 0; degrees < 360; degrees += 10) {
-        const isCardinal = degrees % 90 === 0;
-        const length = isCardinal ? 9 : degrees % 30 === 0 ? 6 : 3.5;
-        ticks += `<line x1="50" y1="6" x2="50" y2="${6 + length}" stroke="#17231f" stroke-width="${isCardinal ? 2 : 1}" transform="rotate(${degrees} 50 50)"/>`;
+        const cardinal = degrees % 90 === 0;
+        const major = degrees % 30 === 0;
+        const length = cardinal ? 8 : major ? 5 : 3;
+
+        ticks += `
+            <line x1="50" y1="7"
+                x2="50" y2="${7 + length}"
+                stroke="#555"
+                stroke-width="${cardinal ? 1.4 : 0.8}"
+                transform="rotate(${degrees} 50 50)"/>
+        `;
     }
-    const letter = (text, x, y, colour) =>
-        `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="700" fill="${colour}">${text}</text>`;
-    return (
-        '<svg viewBox="0 0 100 100" width="92" height="92" role="img" aria-label="Compass">' +
-        '<defs><radialGradient id="compassFace" cx="50%" cy="40%" r="65%">' +
-        '<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d5e0da"/></radialGradient></defs>' +
-        '<circle cx="50" cy="50" r="48" fill="url(#compassFace)" stroke="#17231f" stroke-width="2.5"/>' +
-        '<g id="compassRose">' +
-        '<circle cx="50" cy="50" r="44" fill="none" stroke="#9fb1a9" stroke-width="1"/>' +
-        ticks +
-        letter("N", 50, 25, "#b3261e") + letter("E", 75, 50, "#17231f") +
-        letter("S", 50, 75, "#17231f") + letter("W", 25, 50, "#17231f") +
-        '<polygon points="50,32 57,50 43,50" fill="#b3261e"/>' +
-        '<polygon points="50,68 57,50 43,50" fill="#5a6a64"/>' +
-        '<circle cx="50" cy="50" r="3.5" fill="#fff" stroke="#17231f" stroke-width="1.5"/>' +
-        "</g>" +
-        '<polygon points="50,1 44,11 56,11" fill="#1a73e8"/>' + // fixed marker: the top of your screen
-        "</svg>"
-    );
+
+    const letter = (text, x, y, colour = "#333") => `
+        <text x="${x}" y="${y}"
+            text-anchor="middle"
+            dominant-baseline="central"
+            font-family="Arial, sans-serif"
+            font-size="9"
+            font-weight="600"
+            fill="${colour}">${text}</text>
+    `;
+
+    return `
+    <svg viewBox="0 0 100 100"
+        width="92" height="92"
+        role="img" aria-label="Compass">
+
+        <circle cx="50" cy="50" r="47"
+            fill="#fff"
+            stroke="#bbb"
+            stroke-width="1"/>
+
+        <circle cx="50" cy="50" r="42"
+            fill="none"
+            stroke="#ddd"
+            stroke-width="0.8"/>
+
+        <g id="compassRose">
+            ${ticks}
+
+            ${letter("N", 50, 21, "#c0392b")}
+            ${letter("E", 79, 50)}
+            ${letter("S", 50, 79)}
+            ${letter("W", 21, 50)}
+
+            <polygon points="50,30 56,50 50,46 44,50"
+                fill="#c0392b"/>
+
+            <polygon points="50,70 56,50 50,54 44,50"
+                fill="#555"/>
+
+            <circle cx="50" cy="50" r="2.5"
+                fill="#fff"
+                stroke="#555"
+                stroke-width="1"/>
+        </g>
+
+        <!-- Fixed screen direction -->
+        <polygon points="50,2 45,10 55,10"
+            fill="#3388ff"/>
+
+    </svg>`;
 }
+
 
 const CompassControl = L.Control.extend({
     options: { position: "bottomright" },
@@ -579,8 +608,8 @@ const CompassControl = L.Control.extend({
         box.innerHTML =
             compassSvg() +
             '<div class="compass-turn"' + (rotationSupported ? "" : " hidden") + ">" +
-            '<button type="button" id="compassLeft" aria-label="Rotate map left">&#10226;</button>' +
-            '<button type="button" id="compassRight" aria-label="Rotate map right">&#10227;</button></div>' +
+            '<button style="display: none; visiblity: hidden;" type="button" id="compassLeft" aria-label="Rotate map left">&#10226;</button>' +
+            '<button style="display: none; visiblity: hidden;"  type="button" id="compassRight" aria-label="Rotate map right">&#10227;</button></div>' +
             '<button type="button" id="compassReset" aria-label="Reset map to north">Reset north</button>' +
             '<button type="button" id="compassBtn"></button>';
         L.DomEvent.disableClickPropagation(box);

@@ -338,22 +338,39 @@ summary {
 details.box {
     margin-top: 8px;
 }
-.compass {
-    background: rgba(255, 255, 255, 0.92);
-    border: 1px solid #17231f;
-    border-radius: 10px;
-    padding: 4px;
-    text-align: center;
-    color: #17231f;
+
+.leaflet-control-attribution.leaflet-control {
+    display: none;
 }
+
+.compass.leaflet-control > button {
+    background: #fff;
+    border: 2px solid rgba(0, 0, 0, 0.2);
+    border-radius: 5px;
+    background-clip: padding-box;
+    padding: 3px;
+}
+
 .compass svg {
     display: block;
     margin: 0 auto;
     cursor: pointer;
-    filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.35));
+    filter: none;
+}
+
+.compass.leaflet-control {
+    display: flex;
+    flex-direction: column;
+}
+
+.compass svg {
+    display: block;
+    margin: 0 auto;
+    border: 0px solid rgba(0, 0, 0, 0.2);
+    border-radius: 128px;
 }
 .compass button {
-    margin-top: 4px;
+    margin: 4px;
     font-size: 11px;
     padding: 3px 6px;
     border: 1px solid #17231f;
@@ -582,7 +599,6 @@ details.box {
 /* Compass rotate buttons */
 .compass-turn {
     display: flex;
-    gap: 4px;
     margin-top: 4px;
 }
 .compass-turn[hidden] {
@@ -590,7 +606,7 @@ details.box {
 }
 .compass-turn button {
     flex: 1;
-    margin: 0;
+    margin: 4px;
     font-size: 16px;
     line-height: 1;
     padding: 3px 0;

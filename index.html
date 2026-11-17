@@ -393,7 +393,7 @@ function updateCompass() {
     // The rose turns so "N" always points at true north, whatever way the map is turned
     let roseAngle = 0;
     if (rotationSupported) roseAngle = -currentBearing();
-    else if (following && heading != null) roseAngle = -heading;
+    else if (following && heading != null) roseAngle = heading;
     el("compassRose").setAttribute("transform", `rotate(${roseAngle} 50 50)`);
     el("compassBtn").textContent = following ? "Following compass" : "North locked";
     el("compassBtn").setAttribute("aria-pressed", following);

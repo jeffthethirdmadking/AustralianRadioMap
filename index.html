@@ -301,50 +301,31 @@ async function loadJsonStations() {
 // Data folder: every .json file in data/ becomes one category
 // ---------------------------------------------------------------------------
 
-// const DATA_DIR = "data/";
-// const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
-// async function listDataFiles() {
-//     if (location.protocol === "file:") return []; // browsers block fetch() on file:// pages
-//     try {
-//         const response = await fetch(DATA_DIR);
-//         if (response.ok) {
-//             const html = await response.text();
-//             const doc = new DOMParser().parseFromString(html, "text/html");
-//             const names = [...doc.querySelectorAll("a[href]")]
-//                 .map((a) => a.getAttribute("href").split(/[?#]/)[0].split("/").pop())
-//                 .map((name) => {
-//                     try {
-//                         return decodeURIComponent(name);
-//                     } catch (error) {
-//                         return name;
-//                     }
-//                 })
-//                 .filter((name) => name && isCategoryFile(name));
-//             return [...new Set(names)];
-//         }
-//     } catch (error) {
-//         /* directory listing not available */
-//     }
-//     return [];
-// }
-
-const DATA_URL = "https://raw.githubusercontent.com/jeffthethirdmadking/AustralianRadioMap/main/data/CBRS%20Repeater.json";
-
+const DATA_DIR = "./data/";
+const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
 async function listDataFiles() {
+    if (location.protocol === "file:") return []; // browsers block fetch() on file:// pages
     try {
-        const response = await fetch(DATA_URL);
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const response = await fetch(DATA_DIR);
+        if (response.ok) {
+            const html = await response.text();
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            const names = [...doc.querySelectorAll("a[href]")]
+                .map((a) => a.getAttribute("href").split(/[?#]/)[0].split("/").pop())
+                .map((name) => {
+                    try {
+                        return decodeURIComponent(name);
+                    } catch (error) {
+                        return name;
+                    }
+                })
+                .filter((name) => name && isCategoryFile(name));
+            return [...new Set(names)];
         }
-
-        const data = await response.json();
-
-        return data;
     } catch (error) {
-        console.error("Failed to load CBRS Repeater data:", error);
-        return [];
+        /* directory listing not available */
     }
+    return [];
 }
 
 // UHF CB repeater outputs (what you listen on). Channels 1-8 are on the 25 kHz grid from

@@ -457,7 +457,7 @@ function handleOrientation(event) {
     heading = value;
     if (settings.compassMode === "follow" && rotationSupported) {
         const difference = Math.abs(((value - currentBearing() + 540) % 360) - 180);
-        if (difference > 2) setMapBearing(value); // ignore sensor jitter
+        if (difference > 2) setMapBearing(-value); // ignore sensor jitter
     }
     updateCompass();
 }

@@ -1,0 +1,1511 @@
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// Column positions inside each station array
+const FIELD = {
+    state: 0, siteName: 1, postcode: 2, lat: 3, lon: 4, callSign: 5, licenceNumber: 6,
+    channel: 7, outputMhz: 8, powerWatts: 9, antennaHeightM: 10, polarisation: 11,
+    licenceDate: 12, antennaType: 13, radioType: 14, emission: 15, bandwidthKhz: 16, band: 17,
+    inputMhz: 18, // CB repeaters: the frequency you transmit on (the repeater's input), when known
+    licensee: 19,
+};
+
+const STATE_ORDER = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT", "Unknown"];
+
+// The radio types update_data.py writes (RADIO_TYPE). cb: true means the category has UHF CB
+// channels (RX/TX channel numbers). Records without a known RADIO_TYPE get their own category
+// (see addRecordsToCategories).
+const DEFAULT_RADIO_TYPES = [
+    { id: "cb", label: "UHF CB", color: "#0d6a5a", cb: true },
+    { id: "mvhf", label: "Marine VHF", color: "#2f7de1" },
+    { id: "mhf", label: "Marine HF", color: "#9a63d6" },
+    { id: "ama", label: "Amateur", color: "#d9822b" },
+    { id: "air", label: "Aeronautical", color: "#8a9a93" },
+];
+let RADIO_TYPES, TYPE_LABEL, TYPE_COLOR;
+function setRadioTypes(list) {
+    RADIO_TYPES = list;
+    TYPE_LABEL = Object.fromEntries(list.map((t) => [t.id, t.label]));
+    TYPE_COLOR = Object.fromEntries(list.map((t) => [t.id, t.color]));
+}
+setRadioTypes(DEFAULT_RADIO_TYPES);
+const typeIsCb = (id) => RADIO_TYPES.some((t) => t.id === id && t.cb);
+
+// Colours for categories that aren't one of the known radio types (UHF CB keeps its green)
+const CATEGORY_PALETTE = [
+    "#2f7de1", "#9a63d6", "#d9822b", "#c2417a", "#4f8f2f", "#b8860b",
+    "#0e8aa8", "#7a5230", "#5b6bd6", "#a34f4f", "#3b8f86", "#6d7f2b",
+];
+const CB_COLOR = "#0d6a5a";
+const EMERGENCY_COLOR = "#b3261e";
+
+// UHF CB repeaters: you listen on the repeater channel and transmit 30 channels
+// higher, which is 0.75 MHz ABOVE the repeater's output frequency (e.g. ch 43 listens on
+// 476.4875 MHz and you transmit on ch 73, 477.2375 MHz).
+const CB_TX_CHANNEL_OFFSET = 30;
+const CB_TX_FREQUENCY_OFFSET_MHZ = 0.75;
+const EMERGENCY_CHANNEL = 5;
+const MAX_CHART_BARS = 15;
+const MAX_LABELLED_LINES = 25; // permanent labels on hundreds of lines are unreadable
+
+const SETTINGS_KEY = "auRadioMap.settings.v1";
+const DB_NAME = "auRadioMap";
+const DB_STORE = "cache";
+const DB_KEY = "stations2"; // { stations, types }
+
+const DEFAULT_SETTINGS = {
+    radioType: "cb",
+    state: "All",
+    channel: "",
+    filterText: "",
+    nearestCount: "5",
+    showLines: true,
+    showDistanceLabels: true,
+    showChannelLabels: true,
+    baseMap: "Streets (Esri)",
+    compassMode: "north", // "north" or "follow"
+    location: null, // { lat, lon, label, query }
+    view: null, // { lat, lon, zoom }
+};
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+const el = (id) => document.getElementById(id);
+
+function escapeHtml(text) {
+    const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+    return String(text).replace(/[&<>"]/g, (c) => entities[c]);
+}
+
+function distanceKm(from, to) {
+    const toRad = Math.PI / 180;
+    const dLat = (to[0] - from[0]) * toRad;
+    const dLon = (to[1] - from[1]) * toRad;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(from[0] * toRad) * Math.cos(to[0] * toRad) * Math.sin(dLon / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(a));
+}
+
+function formatKm(km) {
+    return (km < 10 ? km.toFixed(1) : Math.round(km)) + " km";
+}
+
+const hasPosition = (s) => s[FIELD.lat] != null;
+const isCb = (s) => s[FIELD.channel] != null;
+const isEmergency = (s) => s[FIELD.channel] === EMERGENCY_CHANNEL;
+const cbTxChannel = (s) => s[FIELD.channel] + CB_TX_CHANNEL_OFFSET;
+const cbTxMhz = (s) =>
+    s[FIELD.inputMhz] != null ? s[FIELD.inputMhz] : s[FIELD.outputMhz] + CB_TX_FREQUENCY_OFFSET_MHZ;
+// Exact frequency text: shows every decimal place the licence actually has (up to 6, e.g. the
+// 6.25 kHz steps like 477.43125), never fewer than minDecimals. toFixed(3) used to turn
+// 476.4875 into 476.488.
+function fmtMhz(value, minDecimals = 3) {
+    let text = value.toFixed(6);
+    let trim = 0;
+    while (trim < 6 - minDecimals && text.endsWith("0", text.length - trim)) trim++;
+    return trim ? text.slice(0, text.length - trim) : text;
+}
+const mhz = (value) => fmtMhz(value, 4) + " MHz";
+
+// Short badge text: CB channel number, or frequency for other radio types
+const badgeText = (s) => (isCb(s) ? s[FIELD.channel] : fmtMhz(s[FIELD.outputMhz]));
+
+// One-line RX / TX summary with channels and frequencies
+function frequencySummary(s) {
+    if (!isCb(s)) {
+        return `${TYPE_LABEL[s[FIELD.radioType]]} &middot; station transmits ${mhz(s[FIELD.outputMhz])}`;
+    }
+    return (
+        `RX ch ${s[FIELD.channel]} (${mhz(s[FIELD.outputMhz])}) &middot; ` +
+        `TX ch ${cbTxChannel(s)} (${mhz(cbTxMhz(s))})`
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Saved settings (localStorage)
+// ---------------------------------------------------------------------------
+
+let settings = { ...DEFAULT_SETTINGS };
+
+function loadSettings() {
+    try {
+        settings = { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    } catch (error) {
+        settings = { ...DEFAULT_SETTINGS };
+    }
+    // The map API key box has been removed: drop any key an earlier version saved in this browser
+    if ("apiKeys" in settings) {
+        delete settings.apiKeys;
+        saveSettings();
+    }
+}
+
+function saveSettings() {
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+        /* storage unavailable (private mode etc.), carry on without saving */
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Station data cache: the last data loaded is kept in IndexedDB so the page still opens offline
+// ---------------------------------------------------------------------------
+
+function openCacheDb() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore(DB_STORE);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function writeCache(stations, types) {
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, "readwrite");
+        tx.objectStore(DB_STORE).put({ stations, types }, DB_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function readCache() {
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+        const request = db.transaction(DB_STORE).objectStore(DB_STORE).get(DB_KEY);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Data: data/repeaters.json (written by update_data.py), one category per TYPE
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = "./data/";
+const MAIN_DATA_FILE = "repeaters.json";
+const CB_LABEL_PATTERN = /cbrs|uhf[\s_-]*cb/i;
+const isDataFile = (name) => /\.json$/i.test(name) && name.toLowerCase() !== "manifest.json";
+const encodePath = (path) => path.split("/").map(encodeURIComponent).join("/");
+
+// Fetches one JSON file from the data folder. Returns the array of records, or null.
+async function fetchRecords(file) {
+    try {
+        const response = await fetch(DATA_DIR + encodePath(file));
+        if (!response.ok) return null;
+        const data = await response.json();
+        return Array.isArray(data) ? data : null;
+    } catch (error) {
+        return null; // one bad file shouldn't stop the others
+    }
+}
+
+// Fallback for older layouts (one JSON file per type): read the folder's directory listing.
+// Static hosts like GitHub Pages don't offer a listing, which is fine, repeaters.json is tried first.
+async function listDataFiles() {
+    try {
+        const response = await fetch(DATA_DIR);
+        if (!response.ok) return [];
+        const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+        const names = [...doc.querySelectorAll("a[href]")]
+            .map((a) => a.getAttribute("href").split(/[?#]/)[0].split("/").pop())
+            .map((name) => {
+                try {
+                    return decodeURIComponent(name);
+                } catch (error) {
+                    return name;
+                }
+            })
+            .filter((name) => name && isDataFile(name));
+        return [...new Set(names)];
+    } catch (error) {
+        return [];
+    }
+}
+
+// UHF CB repeater outputs (what you listen on). Channels 1-8 are on the 25 kHz grid from
+// 476.425 MHz; channels 41-48 are the 12.5 kHz-offset block from 476.4375 MHz. Used only when
+// a record has no CB_CHANNEL of its own.
+function cbChannelFromMhz(mhzValue) {
+    const slot = (start) => {
+        const n = (mhzValue - start) / 0.025;
+        return Math.abs(n - Math.round(n)) < 0.01 && Math.round(n) >= 0 && Math.round(n) <= 7 ? Math.round(n) : null;
+    };
+    const low = slot(476.425);
+    if (low != null) return low + 1;
+    const high = slot(476.4375);
+    if (high != null) return high + 41;
+    return null;
+}
+
+const toNumber = (value) => {
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? n : null;
+};
+
+function powerInWatts(record) {
+    const power = toNumber(record.TRANSMITTER_POWER);
+    if (power == null) return null;
+    const unit = String(record.TRANSMITTER_POWER_UNIT || "W").toLowerCase();
+    return unit === "w" ? power : unit === "kw" ? power * 1000 : null;
+}
+
+// A record's frequency in MHz (FREQUENCY_MHZ, or FREQUENCY which the ACMA gives in Hz)
+function recordMhz(record) {
+    const mhzValue = toNumber(record.FREQUENCY_MHZ);
+    if (mhzValue != null) return mhzValue;
+    const hz = toNumber(record.FREQUENCY);
+    return hz != null ? hz / 1e6 : null;
+}
+
+// Converts one record from data/repeaters.json to the array form used by the page.
+// The extra fields written by update_data.py (CB_CHANNEL, POWER_WATTS, BAND) are used when present.
+function stationFromRecord(record, typeId, cbType) {
+    const site = record.site || {};
+    const frequency = recordMhz(record);
+    if (frequency == null) return null;
+    const antenna = record.antenna || {};
+    const receiveSide = (record.same_station_devices || []).find((d) => d.DEVICE_TYPE === "R");
+    const receiveMhz = receiveSide ? recordMhz(receiveSide) : null;
+    const stateName = record.STATE && record.STATE !== "NO_SITE" ? record.STATE : site.STATE || "Unknown";
+    const bandwidthHz = toNumber(record.BANDWIDTH);
+
+    const s = new Array(Object.keys(FIELD).length).fill(null);
+    s[FIELD.state] = stateName;
+    s[FIELD.siteName] = site.NAME || "";
+    s[FIELD.postcode] = site.POSTCODE || "";
+    s[FIELD.lat] = toNumber(site.LATITUDE);
+    s[FIELD.lon] = toNumber(site.LONGITUDE);
+    s[FIELD.callSign] = record.CALL_SIGN || "";
+    s[FIELD.licenceNumber] = record.LICENCE_NO || "";
+    s[FIELD.channel] = cbType ? toNumber(record.CB_CHANNEL) ?? cbChannelFromMhz(frequency) : null;
+    s[FIELD.outputMhz] = frequency;
+    s[FIELD.powerWatts] = toNumber(record.POWER_WATTS) ?? powerInWatts(record);
+    s[FIELD.antennaHeightM] = toNumber(record.HEIGHT);
+    s[FIELD.polarisation] = record.POLARISATION || "";
+    s[FIELD.licenceDate] = (record.licence && record.licence.DATE_ISSUED) || record.AUTHORISATION_DATE || "";
+    s[FIELD.antennaType] = [antenna.ANTENNA_TYPE, antenna.MODEL].filter(Boolean).join(" ");
+    s[FIELD.radioType] = typeId;
+    s[FIELD.emission] = (record.EMISSION || "").trim();
+    s[FIELD.bandwidthKhz] = bandwidthHz != null ? bandwidthHz / 1000 : null;
+    s[FIELD.band] = record.BAND || record.SERVICE_NAME || record.SUBSERVICE_NAME || "";
+    s[FIELD.inputMhz] = receiveMhz;
+    s[FIELD.licensee] = (record.client && record.client.LICENCEE) || "";
+    return s;
+}
+
+// Sorts records into categories. Records from update_data.py carry a RADIO_TYPE, which keeps the
+// familiar labels (UHF CB, Marine VHF, Marine HF, Amateur, Aeronautical). Anything without one
+// falls back to its TYPE field, then to the file name.
+const KNOWN_TYPES = Object.fromEntries(DEFAULT_RADIO_TYPES.map((t, index) => [t.id, { ...t, order: index }]));
+
+function addRecordsToCategories(categories, records, file) {
+    const fileLabel = file.split("/").pop().replace(/\.json$/i, "");
+    const groups = new Map(); // category id -> { label, known, records }
+    records.forEach((record) => {
+        const known = KNOWN_TYPES[record.RADIO_TYPE];
+        const label = known
+            ? known.label
+            : String(record.TYPE || fileLabel).replace(/_/g, " ").replace(/\s+/g, " ").trim() || fileLabel;
+        const id = known ? known.id : label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "other";
+        if (!groups.has(id)) groups.set(id, { label, known, records: [] });
+        groups.get(id).records.push(record);
+    });
+
+    groups.forEach(({ label, known, records: groupRecords }, id) => {
+        if (!categories.has(id)) {
+            const isCbType = known ? !!known.cb : CB_LABEL_PATTERN.test(label);
+            categories.set(id, { id, label, cb: isCbType, color: known ? known.color : null, order: known ? known.order : 99, stations: [] });
+        }
+        const category = categories.get(id);
+        // Repeaters have a transmit and a receive row; show each station once, by its transmit row
+        const hasTransmit = groupRecords.some((r) => r.DEVICE_TYPE === "T");
+        groupRecords.forEach((record) => {
+            if (hasTransmit && record.DEVICE_TYPE !== "T") return;
+            const station = stationFromRecord(record, id, category.cb);
+            if (station) category.stations.push(station);
+        });
+    });
+}
+
+async function loadDataFolder() {
+    if (location.protocol === "file:") return null; // browsers block fetch() on file:// pages
+
+    el("status").textContent = "Loading station data...";
+    let sources = [];
+    const main = await fetchRecords(MAIN_DATA_FILE);
+    if (main) {
+        sources = [{ file: MAIN_DATA_FILE, records: main }];
+    } else {
+        const files = await listDataFiles();
+        const loaded = await Promise.all(files.map(async (file) => ({ file, records: await fetchRecords(file) })));
+        sources = loaded.filter((entry) => entry.records);
+    }
+    if (!sources.length) return null;
+
+    const categories = new Map(); // id -> { id, label, cb, color, stations }
+    sources.forEach(({ file, records }) => addRecordsToCategories(categories, records, file));
+
+    const types = [...categories.values()]
+        .filter((c) => c.stations.length)
+        .sort((a, b) => (a.order - b.order) || (b.cb - a.cb) || a.label.localeCompare(b.label));
+    let paletteIndex = 0;
+    types.forEach((t) => {
+        if (!t.color) t.color = t.cb ? CB_COLOR : CATEGORY_PALETTE[paletteIndex++ % CATEGORY_PALETTE.length];
+    });
+
+    const stationList = types.flatMap((t) => t.stations);
+    if (!stationList.length) return null;
+    return {
+        stations: stationList,
+        types: types.map(({ id, label, color, cb }) => ({ id, label, color, cb })),
+        source: sources.length === 1 ? `data/${sources[0].file}` : `data folder (${sources.length} JSON files)`,
+    };
+}
+
+async function loadStations() {
+    const fromFolder = await loadDataFolder();
+    if (fromFolder) {
+        writeCache(fromFolder.stations, fromFolder.types).catch(() => {});
+        return fromFolder;
+    }
+    try {
+        const cached = await readCache();
+        if (cached && cached.stations && cached.stations.length) {
+            return { stations: cached.stations, types: cached.types || DEFAULT_RADIO_TYPES, source: "browser cache" };
+        }
+    } catch (error) {
+        /* no cache available */
+    }
+    return { stations: [], types: DEFAULT_RADIO_TYPES, source: "none" };
+}
+
+// ---------------------------------------------------------------------------
+// Map setup
+// ---------------------------------------------------------------------------
+
+let stations = [];
+let userPosition = null; // [lat, lon]
+let statusMessage = "";
+let userLabel = ""; // text shown when you tap your own dot
+let userAccuracy = 0; // GPS accuracy in metres (0 = don't draw a circle)
+let nearestShown = []; // { km, station } for the stations the lines and labels are drawn to
+let geolocationWatchId = null;
+let firstFixPending = true;
+let locationCandidates = [];
+let candidateSource = "";
+let heading = null; // degrees clockwise from north, from the phone compass
+
+const map = L.map("map", {
+    rotate: true, // leaflet-rotate plugin options
+    bearing: 0,
+    touchRotate: true, // two-finger twist on a phone
+    shiftKeyRotate: true, // Shift + drag on a computer
+    rotateControl: false,
+}).setView([-26, 134], 4);
+// If the plugin failed to load, the map still works but can't rotate
+const rotationSupported = typeof map.setBearing === "function";
+const currentBearing = () => (rotationSupported ? map.getBearing() : 0);
+
+const esriTiles = (service) =>
+    `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/{z}/{y}/{x}`;
+
+const BASE_MAPS = {
+    "Streets (Esri)": L.tileLayer(esriTiles("World_Street_Map"), { maxZoom: 19, attribution: "Tiles &copy; Esri" }),
+    "Satellite (Esri)": L.tileLayer(esriTiles("World_Imagery"), { maxZoom: 19, attribution: "Tiles &copy; Esri" }),
+    OpenStreetMap: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    }),
+};
+
+let tileErrorCount = 0;
+Object.values(BASE_MAPS).forEach((layer) =>
+    layer.on("tileerror", () => {
+        if (++tileErrorCount === 6) {
+            el("tilemsg").textContent =
+                "Map tiles aren’t loading. Try another map style (top right of the map), or open the file in your normal browser.";
+        }
+    })
+);
+
+// ---------------------------------------------------------------------------
+// Compass: visual in the map corner plus a north-lock / follow-phone toggle
+// ---------------------------------------------------------------------------
+
+
+function compassSvg() {
+    let ticks = "";
+
+    for (let degrees = 0; degrees < 360; degrees += 10) {
+        const cardinal = degrees % 90 === 0;
+        const major = degrees % 30 === 0;
+        const length = cardinal ? 8 : major ? 5 : 3;
+
+        ticks += `
+            <line x1="50" y1="7"
+                x2="50" y2="${7 + length}"
+                stroke="#555"
+                stroke-width="${cardinal ? 1.4 : 0.8}"
+                transform="rotate(${degrees} 50 50)"/>
+        `;
+    }
+
+    const letter = (text, x, y, colour = "#333") => `
+        <text x="${x}" y="${y}"
+            text-anchor="middle"
+            dominant-baseline="central"
+            font-family="Arial, sans-serif"
+            font-size="9"
+            font-weight="600"
+            fill="${colour}">${text}</text>
+    `;
+
+    return `
+    <svg viewBox="0 0 100 100"
+        width="92" height="92"
+        role="img" aria-label="Compass">
+
+        <circle cx="50" cy="50" r="47"
+            fill="#fff"
+            stroke="#bbb"
+            stroke-width="1"/>
+
+        <circle cx="50" cy="50" r="42"
+            fill="none"
+            stroke="#ddd"
+            stroke-width="0.8"/>
+
+        <g id="compassRose">
+            ${ticks}
+
+            ${letter("N", 50, 21, "#c0392b")}
+            ${letter("E", 79, 50)}
+            ${letter("S", 50, 79)}
+            ${letter("W", 21, 50)}
+
+            <polygon points="50,30 56,50 50,46 44,50"
+                fill="#c0392b"/>
+
+            <polygon points="50,70 56,50 50,54 44,50"
+                fill="#555"/>
+
+            <circle cx="50" cy="50" r="2.5"
+                fill="#fff"
+                stroke="#555"
+                stroke-width="1"/>
+        </g>
+
+        <!-- Fixed screen direction -->
+        <polygon points="50,2 45,10 55,10"
+            fill="#3388ff"/>
+
+    </svg>`;
+}
+
+
+const CompassControl = L.Control.extend({
+    options: { position: "bottomright" },
+    onAdd() {
+        const box = L.DomUtil.create("div", "compass");
+        box.innerHTML =
+            compassSvg() +
+            '<button type="button" id="compassReset" aria-label="Reset map to north">Reset north</button>' +
+            '<button type="button" id="compassBtn"></button>';
+        L.DomEvent.disableClickPropagation(box);
+        return box;
+    },
+});
+new CompassControl().addTo(map);
+
+// Recenter: pan back to your position (searched address, saved location or GPS) without changing zoom
+function recenterOnPosition() {
+    if (!userPosition) {
+        el("status").textContent = "No position to centre on yet. Search a suburb or address, or tap Find me.";
+        return;
+    }
+    map.setView(userPosition, map.getZoom(), { animate: true });
+}
+
+const RecenterControl = L.Control.extend({
+    options: { position: "topleft" },
+    onAdd() {
+        const bar = L.DomUtil.create("div", "leaflet-bar leaflet-control");
+        const link = L.DomUtil.create("a", "", bar);
+        link.href = "#";
+        link.role = "button";
+        link.title = "Recenter on my position";
+        link.setAttribute("aria-label", "Recenter on my position");
+        link.innerHTML =
+            '<svg viewBox="0 0 24 24" width="18" height="18" style="vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+            '<circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/>' +
+            '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>';
+        link.style.display = "flex";
+        link.style.alignItems = "center";
+        link.style.justifyContent = "center";
+        L.DomEvent.disableClickPropagation(bar);
+        L.DomEvent.on(link, "click", (event) => {
+            L.DomEvent.preventDefault(event);
+            recenterOnPosition();
+        });
+        return bar;
+    },
+});
+new RecenterControl().addTo(map);
+
+function updateCompass() {
+    const following = settings.compassMode === "follow";
+    // The rose turns so "N" always points at true north, whatever way the map is turned
+    let roseAngle = 0;
+    if (rotationSupported) roseAngle = currentBearing();
+    else if (following && heading != null) roseAngle = -heading;
+    el("compassRose").setAttribute("transform", `rotate(${roseAngle} 50 50)`);
+    el("compassBtn").textContent = following ? "Following compass" : "North locked";
+    el("compassBtn").setAttribute("aria-pressed", following);
+    requestStationRepaint();
+}
+
+function setMapBearing(degrees) {
+    if (rotationSupported) map.setBearing(((degrees % 360) + 360) % 360);
+}
+
+// Turning the map yourself hands control back to you, so it switches off compass-following
+function leaveFollowMode() {
+    if (settings.compassMode !== "follow") return;
+    settings.compassMode = "north";
+    stopCompass();
+    saveSettings();
+}
+
+function pointMapNorth() {
+    leaveFollowMode();
+    setMapBearing(0);
+    updateCompass();
+}
+
+function handleOrientation(event) {
+    // iOS gives webkitCompassHeading; Android gives an absolute alpha (counter-clockwise)
+    let value = event.webkitCompassHeading;
+    if (value == null && (event.absolute || event.type === "deviceorientationabsolute") && event.alpha != null) {
+        value = 360 - event.alpha;
+    }
+    if (value == null || Number.isNaN(value)) return;
+    heading = value;
+    if (settings.compassMode === "follow" && rotationSupported) {
+        const difference = Math.abs(((value - currentBearing() + 540) % 360) - 180);
+        if (difference > 2) setMapBearing(-value); // ignore sensor jitter
+    }
+    updateCompass();
+}
+
+async function startCompass() {
+    if (typeof DeviceOrientationEvent === "undefined") {
+        statusMessage = "This device or browser has no compass sensor.";
+        return false;
+    }
+    if (typeof DeviceOrientationEvent.requestPermission === "function") {
+        // iOS Safari: must be asked from a tap, and needs a secure (https) page
+        const answer = await DeviceOrientationEvent.requestPermission();
+        if (answer !== "granted") {
+            statusMessage = "Compass permission was denied.";
+            return false;
+        }
+    }
+    window.addEventListener("deviceorientationabsolute", handleOrientation);
+    window.addEventListener("deviceorientation", handleOrientation);
+    return true;
+}
+
+function stopCompass() {
+    window.removeEventListener("deviceorientationabsolute", handleOrientation);
+    window.removeEventListener("deviceorientation", handleOrientation);
+    heading = null;
+}
+
+async function toggleCompassMode() {
+    if (settings.compassMode === "follow") {
+        settings.compassMode = "north";
+        stopCompass();
+        setMapBearing(0);
+    } else {
+        try {
+            settings.compassMode = (await startCompass()) ? "follow" : "north";
+        } catch (error) {
+            settings.compassMode = "north";
+            statusMessage = "Couldn’t start the compass: " + error.message;
+        }
+    }
+    saveSettings();
+    updateCompass();
+    drawStations(false);
+}
+
+// ---------------------------------------------------------------------------
+// Station filtering, markers and popups
+// ---------------------------------------------------------------------------
+
+function filteredStations() {
+    const text = settings.filterText.trim().toLowerCase();
+    return stations.filter(
+        (s) =>
+            hasPosition(s) &&
+            (settings.radioType === "all" || s[FIELD.radioType] === settings.radioType) &&
+            (settings.state === "All" || s[FIELD.state] === settings.state) &&
+            (!settings.channel || s[FIELD.channel] == settings.channel) &&
+            (!text || `${s[FIELD.siteName]} ${s[FIELD.callSign]} ${s[FIELD.postcode]}`.toLowerCase().includes(text))
+    );
+}
+
+function popupHtml(s) {
+    const row = (label, value) => (value === "" || value == null ? "" : `<dt>${label}</dt><dd>${value}</dd>`);
+    const cb = isCb(s);
+
+    const frequencyRows = cb
+        ? row("RX (you listen)", `ch ${s[FIELD.channel]} &middot; ${mhz(s[FIELD.outputMhz])}`) +
+          row("TX (you transmit)", `ch ${cbTxChannel(s)} &middot; ${mhz(cbTxMhz(s))}`)
+        : row("Radio type", TYPE_LABEL[s[FIELD.radioType]]) +
+          row("Band", escapeHtml(s[FIELD.band])) +
+          row("Station transmits", mhz(s[FIELD.outputMhz])) +
+          row("Emission", escapeHtml(s[FIELD.emission])) +
+          row("Bandwidth", s[FIELD.bandwidthKhz] != null ? s[FIELD.bandwidthKhz] + " kHz" : "");
+
+    const distanceRow = userPosition
+        ? row("Distance from you", formatKm(distanceKm(userPosition, [s[FIELD.lat], s[FIELD.lon]])))
+        : "";
+    const polarisation = { V: "Vertical", H: "Horizontal" }[s[FIELD.polarisation]] || "";
+
+    return `<h2>${escapeHtml(s[FIELD.siteName] || "Site not recorded")}</h2>
+${isEmergency(s) ? '<p class="em">Emergency use only</p>' : ""}<dl>
+${row("State", s[FIELD.state])}${row("Postcode", escapeHtml(s[FIELD.postcode] || ""))}${distanceRow}
+${row("Call sign", escapeHtml(s[FIELD.callSign]))}${row("Licensee", escapeHtml(s[FIELD.licensee] || ""))}${frequencyRows}
+${row("Power", s[FIELD.powerWatts] ? s[FIELD.powerWatts] + " W" : "")}
+${row("Antenna height", s[FIELD.antennaHeightM] != null ? s[FIELD.antennaHeightM] + " m" : "")}
+${row("Polarisation", polarisation)}${row("Licence", escapeHtml(s[FIELD.licenceNumber] || ""))}
+${row("Licence date", escapeHtml(s[FIELD.licenceDate] || ""))}${row("Antenna", escapeHtml(s[FIELD.antennaType] || ""))}
+</dl><p><a href="https://www.google.com/maps/dir/?api=1&destination=${s[FIELD.lat]},${s[FIELD.lon]}" target="_blank" rel="noopener">Directions</a></p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Everything drawn over the map: station dots, lines to the nearest stations, their labels, your
+// position and the compass arrow. It is all painted on one canvas in screen coordinates and
+// repainted on every frame the map moves, so it stays locked to the tiles while pinching, panning
+// and rotating. (Leaflet's own markers, lines and tooltips only catch up when a gesture ends,
+// which is why they lagged behind the map on a phone.)
+// ---------------------------------------------------------------------------
+
+const TAU = Math.PI * 2;
+const stationCanvas = document.createElement("canvas");
+stationCanvas.className = "station-canvas";
+stationCanvas.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:401;transform-origin:0 0;";
+map.getContainer().appendChild(stationCanvas);
+
+let visibleStations = []; // stations passing the current filters
+let drawnPoints = []; // { x, y, station } for the dots painted last frame, used for taps
+let repaintQueued = false;
+
+function requestStationRepaint() {
+    if (repaintQueued) return;
+    repaintQueued = true;
+    requestAnimationFrame(paintStations);
+}
+
+// The areas the open popup covers (its box and its tip), in screen coordinates. This canvas sits
+// above the popup, so nothing is painted inside these areas.
+function openPopupHoles() {
+    const popup = map._popup;
+    const node = popup && popup.isOpen() && popup._container;
+    if (!node) return [];
+    const outer = map.getContainer().getBoundingClientRect();
+    const holes = [];
+    [[".leaflet-popup-content-wrapper", 12], [".leaflet-popup-tip-container", 0]].forEach(([selector, radius]) => {
+        const part = node.querySelector(selector);
+        if (!part) return;
+        const box = part.getBoundingClientRect();
+        holes.push({ x: box.left - outer.left, y: box.top - outer.top, width: box.width, height: box.height, radius });
+    });
+    return holes;
+}
+
+const LABEL_FONT = "600 12px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const LABEL_LINE_HEIGHT = 15;
+const USER_DOT_RADIUS = 9;
+
+// Text lines for a station's label: distance, then RX / TX, as chosen in the line options
+function labelLines(km, station) {
+    const lines = [];
+    if (settings.showDistanceLabels) lines.push(formatKm(km));
+    if (settings.showChannelLabels) {
+        if (isCb(station)) {
+            lines.push(`RX ${station[FIELD.channel]} \u00b7 ${fmtMhz(station[FIELD.outputMhz])}`);
+            lines.push(`TX ${cbTxChannel(station)} \u00b7 ${fmtMhz(cbTxMhz(station))}`);
+        } else {
+            lines.push(`RX ${fmtMhz(station[FIELD.outputMhz])} MHz`);
+        }
+    }
+    return lines;
+}
+
+function roundedRectPath(ctx, x, y, width, height, radius) {
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, radius);
+    ctx.arcTo(x + width, y + height, x, y + height, radius);
+    ctx.arcTo(x, y + height, x, y, radius);
+    ctx.arcTo(x, y, x + width, y, radius);
+    ctx.closePath();
+}
+
+// A small white label. "centre" puts it on (x, y); "above" sits it with its bottom edge at y.
+function drawLabel(ctx, lines, x, y, placement) {
+    ctx.font = LABEL_FONT;
+    const width = Math.max(...lines.map((text) => ctx.measureText(text).width)) + 12;
+    const height = lines.length * LABEL_LINE_HEIGHT + 6;
+    const top = placement === "above" ? y - height : y - height / 2;
+    ctx.beginPath();
+    roundedRectPath(ctx, x - width / 2, top, width, height, 5);
+    ctx.fillStyle = "rgba(255,255,255,0.93)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#1d1d1d";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    lines.forEach((text, index) => ctx.fillText(text, x, top + 3 + LABEL_LINE_HEIGHT * (index + 0.5)));
+}
+
+const metresToPixels = (metres, latitude) =>
+    metres / ((40075016.686 * Math.cos((latitude * Math.PI) / 180)) / (256 * 2 ** map.getZoom()));
+
+function paintStations() {
+    repaintQueued = false;
+    const size = map.getSize();
+    const ratio = window.devicePixelRatio || 1;
+    const pixelWidth = Math.round(size.x * ratio);
+    const pixelHeight = Math.round(size.y * ratio);
+    if (stationCanvas.width !== pixelWidth || stationCanvas.height !== pixelHeight) {
+        stationCanvas.width = pixelWidth;
+        stationCanvas.height = pixelHeight;
+        stationCanvas.style.width = size.x + "px";
+        stationCanvas.style.height = size.y + "px";
+    }
+    stationCanvas.style.transition = "none";
+    stationCanvas.style.transform = "";
+    stationCanvas.style.visibility = "visible";
+
+    const ctx = stationCanvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, size.x, size.y);
+    drawnPoints = [];
+
+    // Everything below is painted with the open popup's area cut out, so the popup stays on top
+    const holes = openPopupHoles();
+    ctx.save();
+    if (holes.length) {
+        ctx.beginPath();
+        ctx.rect(0, 0, size.x, size.y);
+        holes.forEach((hole) => roundedRectPath(ctx, hole.x, hole.y, hole.width, hole.height, hole.radius));
+        ctx.clip("evenodd");
+    }
+    paintOverlays(ctx, size);
+    ctx.restore();
+}
+
+function paintOverlays(ctx, size) {
+    // Your position and the nearest stations, as screen points (re-projected every frame)
+    const userPoint = userPosition ? map.latLngToContainerPoint(userPosition) : null;
+    const nearestPoints = userPoint
+        ? nearestShown.map(({ km, station }) => ({
+              km,
+              station,
+              point: map.latLngToContainerPoint([station[FIELD.lat], station[FIELD.lon]]),
+          }))
+        : [];
+    const labelled = nearestPoints.length <= MAX_LABELLED_LINES; // labels on hundreds of lines are unreadable
+
+    if (userPoint && userAccuracy) {
+        ctx.beginPath();
+        ctx.arc(userPoint.x, userPoint.y, metresToPixels(userAccuracy, userPosition[0]), 0, TAU);
+        ctx.fillStyle = "rgba(26,115,232,0.1)";
+        ctx.fill();
+        ctx.strokeStyle = "#1a73e8";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+    if (userPoint && settings.showLines) {
+        ctx.setLineDash([7, 7]);
+        ctx.lineWidth = labelled ? 3 : 1.5;
+        ctx.globalAlpha = labelled ? 0.85 : 0.5;
+        nearestPoints.forEach(({ station, point }) => {
+            ctx.strokeStyle = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+            ctx.beginPath();
+            ctx.moveTo(userPoint.x, userPoint.y);
+            ctx.lineTo(point.x, point.y);
+            ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+    }
+
+    const batches = new Map(); // "colour|radius" -> points, so each colour is one fill
+    for (const station of visibleStations) {
+        const point = map.latLngToContainerPoint([station[FIELD.lat], station[FIELD.lon]]);
+        if (point.x < -12 || point.y < -12 || point.x > size.x + 12 || point.y > size.y + 12) continue;
+        const emergency = isEmergency(station);
+        const key = (emergency ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]]) + "|" + (emergency ? 8 : 6);
+        if (!batches.has(key)) batches.set(key, []);
+        batches.get(key).push(point);
+        drawnPoints.push({ x: point.x, y: point.y, station });
+    }
+
+    batches.forEach((points, key) => {
+        const [colour, radiusText] = key.split("|");
+        const radius = +radiusText;
+        ctx.fillStyle = "#fff"; // white ring
+        ctx.beginPath();
+        points.forEach((p) => {
+            ctx.moveTo(p.x + radius + 0.75, p.y);
+            ctx.arc(p.x, p.y, radius + 0.75, 0, TAU);
+        });
+        ctx.fill();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = colour;
+        ctx.beginPath();
+        points.forEach((p) => {
+            ctx.moveTo(p.x + radius - 0.75, p.y);
+            ctx.arc(p.x, p.y, radius - 0.75, 0, TAU);
+        });
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    });
+
+    if (!userPoint) return;
+
+    // Heading arrow while following the phone's compass
+    if (settings.compassMode === "follow" && heading != null) {
+        ctx.save();
+        ctx.translate(userPoint.x, userPoint.y);
+        ctx.rotate(((heading - currentBearing()) * Math.PI) / 180);
+        ctx.beginPath();
+        ctx.moveTo(0, -28);
+        ctx.lineTo(10, -13);
+        ctx.lineTo(-10, -13);
+        ctx.closePath();
+        ctx.fillStyle = "rgba(26,115,232,0.9)";
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // Your dot
+    ctx.beginPath();
+    ctx.arc(userPoint.x, userPoint.y, USER_DOT_RADIUS, 0, TAU);
+    ctx.fillStyle = "#1a73e8";
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Labels last, so they sit on top. On the line when lines are drawn, otherwise above each marker.
+    if (!labelled) return;
+    nearestPoints.forEach(({ km, station, point }) => {
+        const lines = labelLines(km, station);
+        if (!lines.length) return;
+        const x = settings.showLines ? (userPoint.x + point.x) / 2 : point.x;
+        const y = settings.showLines ? (userPoint.y + point.y) / 2 : point.y - (isEmergency(station) ? 8 : 6) - 8;
+        if (x < -80 || y < -80 || x > size.x + 80 || y > size.y + 80) return;
+        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above");
+    });
+}
+
+// Animated zooms (buttons, double tap, the snap at the end of a pinch): slide the canvas along
+// with the tiles. When the map is rotated the maths differs, so just hide the dots until it lands.
+map.on("zoomanim", (event) => {
+    if (rotationSupported && Math.abs(currentBearing()) > 0.01) {
+        stationCanvas.style.visibility = "hidden";
+        return;
+    }
+    const scale = map.getZoomScale(event.zoom);
+    const size = map.getSize();
+    const oldCentre = map.project(map.getCenter(), map.getZoom());
+    const newCentre = map.project(event.center, event.zoom);
+    const shiftX = (size.x / 2) * (1 - scale) + scale * oldCentre.x - newCentre.x;
+    const shiftY = (size.y / 2) * (1 - scale) + scale * oldCentre.y - newCentre.y;
+    stationCanvas.style.transition = "transform 0.25s cubic-bezier(0, 0, 0.25, 1)";
+    stationCanvas.style.transform = `translate(${shiftX}px, ${shiftY}px) scale(${scale})`;
+});
+map.on("move zoom zoomend moveend resize viewreset rotate popupopen popupclose", requestStationRepaint);
+
+// Tapping the map opens the nearest dot's popup (the dots are painted, so they have no click events)
+map.on("click", (event) => {
+    const tap = map.latLngToContainerPoint(event.latlng);
+    const reach = L.Browser.touch ? 20 : 12;
+    if (userPosition) {
+        const dot = map.latLngToContainerPoint(userPosition);
+        if ((dot.x - tap.x) ** 2 + (dot.y - tap.y) ** 2 < (USER_DOT_RADIUS + reach / 2) ** 2) {
+            L.popup().setLatLng(userPosition).setContent(escapeHtml(userLabel)).openOn(map);
+            return;
+        }
+    }
+    let best = null;
+    let bestDistance = reach * reach;
+    drawnPoints.forEach((dot) => {
+        const distance = (dot.x - tap.x) ** 2 + (dot.y - tap.y) ** 2;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = dot;
+        }
+    });
+    if (best) {
+        L.popup()
+            .setLatLng([best.station[FIELD.lat], best.station[FIELD.lon]])
+            .setContent(popupHtml(best.station))
+            .openOn(map);
+    }
+});
+
+function drawStations(fitToResults) {
+    visibleStations = filteredStations();
+    requestStationRepaint();
+
+    if (fitToResults && visibleStations.length) {
+        map.fitBounds(L.latLngBounds(visibleStations.map((s) => [s[FIELD.lat], s[FIELD.lon]])), {
+            padding: [30, 30],
+            maxZoom: 10,
+        });
+    }
+
+    const noun = typeIsCb(settings.radioType) ? "repeater" : "station";
+    el("status").textContent =
+        statusMessage ||
+        `${visibleStations.length} ${noun}${visibleStations.length === 1 ? "" : "s"} shown` +
+            (settings.state === "All" ? "" : " in " + settings.state);
+}
+
+// ---------------------------------------------------------------------------
+// Filter buttons
+// ---------------------------------------------------------------------------
+
+function countByState() {
+    const counts = { All: 0 };
+    stations.forEach((s) => {
+        if (hasPosition(s) && (settings.radioType === "all" || s[FIELD.radioType] === settings.radioType)) {
+            counts.All++;
+            counts[s[FIELD.state]] = (counts[s[FIELD.state]] || 0) + 1;
+        }
+    });
+    return counts;
+}
+
+function buildTypeButtons() {
+    const counts = { all: 0 };
+    stations.forEach((s) => {
+        if (!hasPosition(s)) return;
+        counts.all++;
+        counts[s[FIELD.radioType]] = (counts[s[FIELD.radioType]] || 0) + 1;
+    });
+    const options = [{ id: "all", label: "All types" }, ...RADIO_TYPES];
+    el("types").innerHTML = options
+        .map(
+            (t) =>
+                `<button data-type="${t.id}" aria-pressed="${t.id === settings.radioType}">${t.label}<b>${counts[t.id] || 0}</b></button>`
+        )
+        .join("");
+}
+
+function buildStateButtons() {
+    const counts = countByState();
+    const otherStates = Object.keys(counts).filter((s) => s !== "All" && !STATE_ORDER.includes(s)).sort();
+    el("states").innerHTML = ["All", ...STATE_ORDER.filter((s) => counts[s]), ...otherStates]
+        .map((s) => `<button data-state="${s}" aria-pressed="${s === settings.state}">${s}<b>${counts[s]}</b></button>`)
+        .join("");
+}
+
+function buildChannelOptions() {
+    const channels = [...new Set(stations.map((s) => s[FIELD.channel]).filter((c) => c != null))].sort((a, b) => a - b);
+    el("ch").insertAdjacentHTML("beforeend", channels.map((c) => `<option value="${c}">Channel ${c}</option>`).join(""));
+}
+
+function applyRadioTypeToChannelFilter() {
+    const channelsApply = settings.radioType === "all" || typeIsCb(settings.radioType);
+    el("ch").hidden = !channelsApply;
+    if (!channelsApply) {
+        el("ch").value = "";
+        settings.channel = "";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nearest stations: lines, labels and the collapsible list
+// ---------------------------------------------------------------------------
+
+function nearestStations() {
+    const wanted = settings.nearestCount === "all" ? Infinity : +settings.nearestCount;
+    return filteredStations()
+        .map((s) => ({ km: distanceKm(userPosition, [s[FIELD.lat], s[FIELD.lon]]), station: s }))
+        .sort((a, b) => a.km - b.km)
+        .slice(0, wanted);
+}
+
+function updateNearest() {
+    el("opts").hidden = !userPosition;
+    if (!userPosition) {
+        nearestShown = [];
+        requestStationRepaint();
+        el("near").innerHTML = "";
+        el("nearBox").hidden = true;
+        el("chartBox").hidden = true;
+        return;
+    }
+    el("nearBox").hidden = false;
+    el("chartBox").hidden = false;
+
+    const nearest = nearestStations();
+
+    // The lines and labels are painted with the dots (see paintStations)
+    nearestShown = nearest;
+    requestStationRepaint();
+
+    el("nearSummary").textContent = `Nearest to you (${nearest.length})`;
+    el("near").innerHTML = nearest
+        .map(
+            ({ km, station }) =>
+                `<button data-index="${stations.indexOf(station)}">` +
+                `<span class="chb${isEmergency(station) ? " em" : ""}">${badgeText(station)}</span>` +
+                `<span>${escapeHtml(station[FIELD.siteName] || station[FIELD.callSign])}<br>` +
+                `<small>${station[FIELD.state]} &middot; ${frequencySummary(station)}</small></span>` +
+                `<span class="km">${formatKm(km)}</span></button>`
+        )
+        .join("");
+    renderDistanceChart(nearest);
+}
+
+// Horizontal bar chart of distance to the nearest stations, coloured by radio type
+function renderDistanceChart(nearest) {
+    const bars = nearest.slice(0, MAX_CHART_BARS);
+    const longest = Math.max(...bars.map((entry) => entry.km), 1);
+    el("chartSummary").textContent = `Distance chart (${bars.length})`;
+    el("distChart").innerHTML =
+        bars
+            .map(({ km, station }) => {
+                const colour = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+                const width = Math.max(2, (km / longest) * 100);
+                const label = escapeHtml(station[FIELD.siteName] || station[FIELD.callSign]);
+                return (
+                    `<div class="bar-row"><span class="bar-label"><b>${badgeText(station)}</b> ${label}</span>` +
+                    `<span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${colour}"></span></span>` +
+                    `<span class="bar-km">${formatKm(km)}</span></div>`
+                );
+            })
+            .join("") +
+        (nearest.length > bars.length ? `<p class="bar-note">Showing the nearest ${bars.length} of ${nearest.length}.</p>` : "");
+}
+
+// ---------------------------------------------------------------------------
+// User position: search by address, saved location, GPS
+// ---------------------------------------------------------------------------
+
+function setUserPosition(position, label, accuracyMetres) {
+    userPosition = position;
+    userLabel = label;
+    userAccuracy = accuracyMetres || 0;
+    requestStationRepaint();
+}
+
+function rememberLocation(label, query) {
+    settings.location = { lat: userPosition[0], lon: userPosition[1], label, query: query || "" };
+    saveSettings();
+}
+
+function stopGps() {
+    if (geolocationWatchId != null) {
+        navigator.geolocation.clearWatch(geolocationWatchId);
+        geolocationWatchId = null;
+    }
+}
+
+function useCandidate(index) {
+    const candidate = locationCandidates[index];
+    const shortName = candidate.display_name.split(",").slice(0, 3).join(",");
+    setUserPosition([+candidate.lat, +candidate.lon], "Searching from " + shortName, 0);
+    rememberLocation(shortName, el("aq").value.trim());
+    statusMessage =
+        "Showing stations near " + shortName + "." +
+        (candidateSource === "local" ? " (Matched to a listed station site, because the online address lookup wasn’t available.)" : "");
+    map.setView(userPosition, 10);
+    drawStations(false);
+    updateNearest();
+}
+
+// Offline fallback: match a postcode or site name from the station list itself
+function localSearch(query) {
+    const cleaned = query
+        .toLowerCase()
+        .replace(/,/g, " ")
+        .replace(/\b(nsw|vic|qld|sa|wa|tas|nt|act|australia)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!cleaned) return [];
+    const located = stations.filter(hasPosition);
+
+    if (/^\d{4}$/.test(cleaned)) {
+        const matches = located.filter((s) => s[FIELD.postcode] === cleaned);
+        if (matches.length) {
+            return [{
+                lat: matches.reduce((sum, s) => sum + s[FIELD.lat], 0) / matches.length,
+                lon: matches.reduce((sum, s) => sum + s[FIELD.lon], 0) / matches.length,
+                display_name: "Postcode " + cleaned + ", " + matches[0][FIELD.state],
+            }];
+        }
+    }
+    const seen = new Set();
+    const results = [];
+    for (const s of located) {
+        if (s[FIELD.siteName].toLowerCase().includes(cleaned)) {
+            const key = s[FIELD.lat] + "," + s[FIELD.lon];
+            if (!seen.has(key)) {
+                seen.add(key);
+                results.push({ lat: s[FIELD.lat], lon: s[FIELD.lon], display_name: s[FIELD.siteName] + ", " + s[FIELD.state] });
+            }
+        }
+        if (results.length >= 5) break;
+    }
+    return results;
+}
+
+// Tries Photon, then Open-Meteo, then Nominatim, then the local station list
+async function geocode(query) {
+    try {
+        const response = await fetch(
+            "https://photon.komoot.io/api/?limit=6&lang=en&bbox=112,-44.5,154.5,-9&q=" + encodeURIComponent(query)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            const results = [];
+            (json.features || []).forEach((feature) => {
+                const p = feature.properties || {};
+                if (p.countrycode && p.countrycode !== "AU") return;
+                const parts = [
+                    p.name,
+                    [p.housenumber, p.street].filter(Boolean).join(" "),
+                    p.city || p.district,
+                    p.state,
+                    p.postcode,
+                ].filter(Boolean);
+                results.push({
+                    lat: feature.geometry.coordinates[1],
+                    lon: feature.geometry.coordinates[0],
+                    display_name: [...new Set(parts)].join(", "),
+                });
+            });
+            if (results.length) return [results, "online"];
+        }
+    } catch (error) { /* try the next service */ }
+
+    try {
+        const placeName = query
+            .replace(/,/g, " ")
+            .replace(/\b(nsw|vic|qld|sa|wa|tas|nt|act|australia)\b/gi, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        const response = await fetch(
+            "https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&country_code=AU&name=" +
+                encodeURIComponent(placeName)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            const results = (json.results || []).map((p) => ({
+                lat: p.latitude,
+                lon: p.longitude,
+                display_name: [p.name, p.admin1, (p.postcodes || [])[0]].filter(Boolean).join(", "),
+            }));
+            if (results.length) return [results, "online"];
+        }
+    } catch (error) { /* try the next service */ }
+
+    try {
+        const response = await fetch(
+            "https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=au&limit=5&q=" + encodeURIComponent(query)
+        );
+        if (response.ok) {
+            const json = await response.json();
+            if (json.length) return [json, "online"];
+        }
+    } catch (error) { /* fall back to local data */ }
+
+    return [localSearch(query), "local"];
+}
+
+// Show the best match, with the other matches tucked into a collapsed section
+function renderAlternatives() {
+    if (!locationCandidates.length) {
+        el("alts").innerHTML = "";
+        return;
+    }
+    const button = (candidate, index) =>
+        `<button type="button" data-index="${index}">${escapeHtml(candidate.display_name)}</button>`;
+    const others = locationCandidates.slice(1);
+    el("alts").innerHTML =
+        button(locationCandidates[0], 0) +
+        (others.length
+            ? `<details class="more"><summary>${others.length} other match${others.length === 1 ? "" : "es"}</summary>` +
+              others.map((c, i) => button(c, i + 1)).join("") +
+              "</details>"
+            : "");
+}
+
+function clearUserPosition() {
+    stopGps();
+    userPosition = null;
+    userAccuracy = 0;
+    statusMessage = "";
+    locationCandidates = [];
+    settings.location = null;
+    saveSettings();
+    renderAlternatives();
+    updateNearest();
+    drawStations(false);
+}
+
+function startGps() {
+    if (!navigator.geolocation) {
+        statusMessage = "Location is not available in this browser. Enter a suburb above instead.";
+        return drawStations(false);
+    }
+    stopGps();
+    firstFixPending = true;
+    statusMessage = "Finding your location…";
+    locationCandidates = [];
+    renderAlternatives();
+    drawStations(false);
+
+    geolocationWatchId = navigator.geolocation.watchPosition(
+        (position) => {
+            statusMessage = "";
+            setUserPosition([position.coords.latitude, position.coords.longitude], "You are here", position.coords.accuracy);
+            rememberLocation("Your location", "");
+            if (firstFixPending) {
+                map.setView(userPosition, 9);
+                firstFixPending = false;
+            }
+            drawStations(false);
+            updateNearest();
+        },
+        (error) => {
+            statusMessage =
+                error.code === 1
+                    ? "Location permission was denied. Allow location for this page, or enter a suburb above."
+                    : "Couldn’t get your location. Check GPS or signal, or enter a suburb above.";
+            drawStations(false);
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 }
+    );
+}
+
+async function handleAddressSearch(event) {
+    event.preventDefault();
+    const query = el("aq").value.trim();
+    if (!query) return;
+    stopGps();
+    statusMessage = "Searching…";
+    locationCandidates = [];
+    renderAlternatives();
+    drawStations(false);
+    try {
+        const [results, source] = await geocode(query);
+        candidateSource = source;
+        if (!results.length) {
+            statusMessage = "No match found. Try the suburb and state (for example Alice Springs NT) or a 4-digit postcode.";
+            return drawStations(false);
+        }
+        locationCandidates = results;
+        useCandidate(0);
+        renderAlternatives();
+    } catch (error) {
+        statusMessage = "Search failed: " + (error && error.message ? error.message : "unknown error") + ". Check the browser console for details.";
+        drawStations(false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event wiring
+// ---------------------------------------------------------------------------
+
+function wireEvents() {
+    el("types").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        settings.radioType = button.dataset.type;
+        applyRadioTypeToChannelFilter();
+        if (settings.state !== "All" && !countByState()[settings.state]) settings.state = "All";
+        saveSettings();
+        buildTypeButtons();
+        buildStateButtons();
+        drawStations(true);
+        updateNearest();
+    };
+
+    el("states").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        settings.state = button.dataset.state;
+        saveSettings();
+        buildStateButtons();
+        drawStations(true);
+        updateNearest();
+    };
+
+    el("q").addEventListener("input", () => {
+        settings.filterText = el("q").value;
+        saveSettings();
+        drawStations(false);
+        updateNearest();
+    });
+    el("ch").addEventListener("input", () => {
+        settings.channel = el("ch").value;
+        saveSettings();
+        drawStations(false);
+        updateNearest();
+    });
+
+    el("addr").onsubmit = handleAddressSearch;
+    el("me").onclick = startGps;
+    el("aq").addEventListener("input", () => {
+        if (!el("aq").value.trim() && (userPosition || locationCandidates.length || statusMessage)) clearUserPosition();
+    });
+
+    el("alts").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        const index = +button.dataset.index;
+        el("aq").value = locationCandidates[index].display_name;
+        useCandidate(index);
+    };
+
+    // Display options
+    const optionInputs = {
+        olines: ["showLines", "checked"],
+        olabels: ["showDistanceLabels", "checked"],
+        ochan: ["showChannelLabels", "checked"],
+        ncount: ["nearestCount", "value"],
+    };
+    Object.entries(optionInputs).forEach(([id, [key, prop]]) =>
+        el(id).addEventListener("change", () => {
+            settings[key] = el(id)[prop];
+            saveSettings();
+            updateNearest();
+        })
+    );
+
+    el("near").onclick = (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        const station = stations[+button.dataset.index];
+        map.setView([station[FIELD.lat], station[FIELD.lon]], Math.max(map.getZoom(), 11));
+        L.popup().setLatLng([station[FIELD.lat], station[FIELD.lon]]).setContent(popupHtml(station)).openOn(map);
+    };
+
+    el("compassBtn").onclick = toggleCompassMode;
+    el("compassReset").onclick = pointMapNorth;
+    map.on("rotate", updateCompass);
+    // A two-finger twist means you want to steer: stop the compass fighting your fingers
+    map.getContainer().addEventListener(
+        "touchstart",
+        (event) => {
+            if (event.touches.length >= 2 && settings.compassMode === "follow") {
+                leaveFollowMode();
+                updateCompass();
+            }
+        },
+        { passive: true }
+    );
+
+    map.on("baselayerchange", (event) => {
+        settings.baseMap = event.name;
+        saveSettings();
+    });
+    map.on("moveend", () => {
+        const centre = map.getCenter();
+        settings.view = { lat: centre.lat, lon: centre.lng, zoom: map.getZoom() };
+        saveSettings();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Start up
+// ---------------------------------------------------------------------------
+
+function applySettingsToControls() {
+    el("q").value = settings.filterText;
+    el("olines").checked = settings.showLines;
+    el("olabels").checked = settings.showDistanceLabels;
+    el("ochan").checked = settings.showChannelLabels;
+    el("ncount").value = settings.nearestCount;
+    el("ch").value = settings.channel;
+    applyRadioTypeToChannelFilter();
+}
+
+async function init() {
+    loadSettings();
+    const loaded = await loadStations();
+    stations = loaded.stations;
+    if (!stations.length) {
+        el("status").textContent =
+            "No station data found. Serve this page over http(s) with data/repeaters.json next to it (run update_data.py to create it), or open the page once with the data present so it can be cached.";
+        return;
+    }
+    setRadioTypes(loaded.types);
+    // A saved category may no longer exist: fall back to the first UHF CB category, else all
+    if (settings.radioType !== "all" && !RADIO_TYPES.some((t) => t.id === settings.radioType)) {
+        const firstCb = RADIO_TYPES.find((t) => t.cb);
+        settings.radioType = firstCb ? firstCb.id : "all";
+    }
+
+    // Restore the saved map style (a style that no longer exists falls back to the default)
+    if (!BASE_MAPS[settings.baseMap]) settings.baseMap = DEFAULT_SETTINGS.baseMap;
+    BASE_MAPS[settings.baseMap].addTo(map);
+    L.control.layers(BASE_MAPS, null, { position: "topright" }).addTo(map);
+
+    buildChannelOptions();
+    if (settings.state !== "All" && !countByState()[settings.state]) settings.state = "All";
+    applySettingsToControls();
+    buildTypeButtons();
+    buildStateButtons();
+
+    el("legend").innerHTML =
+        RADIO_TYPES.map((t) => `<i style="background:${t.color}"></i>${t.label}`).join("") +
+        (RADIO_TYPES.some((t) => t.cb) || stations.some(isEmergency) ? `<i style="background:${EMERGENCY_COLOR}"></i>Emergency (CB ch 5)` : "");
+    el("datasource").textContent = "Station data loaded from the " + loaded.source + ".";
+
+    wireEvents();
+
+    // Restore the last search location and map view
+    const hadSavedView = !!settings.view;
+    if (hadSavedView) map.setView([settings.view.lat, settings.view.lon], settings.view.zoom);
+    if (settings.location) {
+        const saved = settings.location;
+        el("aq").value = saved.query || (saved.label !== "Your location" ? saved.label : "");
+        setUserPosition([saved.lat, saved.lon], saved.label === "Your location" ? "Last known location" : "Searching from " + saved.label, 0);
+        statusMessage = "Showing stations near " + saved.label + " (saved from last time).";
+    }
+
+    drawStations(!hadSavedView);
+    updateNearest();
+    updateCompass();
+
+    if (settings.compassMode === "follow") {
+        // Browsers (iOS especially) need a tap to start the compass again
+        settings.compassMode = "north";
+        updateCompass();
+    }
+}
+
+init();

@@ -24,6 +24,11 @@ and four fields added for the map:
   POWER_WATTS  transmitter power converted to watts
   CB_CHANNEL   UHF CB channel number (the dataset has none, so it is worked out from the frequency)
 
+Only licences that are active TODAY are kept: the licence status must be "Granted" (or "Granted
+(Under modification)"), its date of effect must not be in the future and its expiry date must not
+have passed. Licences with no expiry date are treated as open-ended. Everything else (expired,
+surrendered, revoked, not granted ...) is skipped and counted in the run summary.
+
 Records are sorted so every radio type sits together (cb, mvhf, mhf, ama, air), then by
 TYPE (the licence subservice), state and site name.
 
@@ -32,6 +37,7 @@ TYPE (the licence subservice), state and site name.
     python update_data.py --zip path\\to\\spectra_rrl.zip    # use a zip you already have
     python update_data.py --include-receivers              # also keep receive-side device rows
     python update_data.py --no-text       # skip licence conditions (smaller file, less memory)
+    python update_data.py --as-of 2026-11-18               # judge "active" on this date instead of today
 
 Only the Python standard library is needed. The device table is about 390 MB, so
 a full run takes a few minutes.
@@ -50,6 +56,7 @@ import time
 import urllib.request
 import zipfile
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))  # licence condition text can be long
@@ -83,6 +90,12 @@ for n in range(8):
     CB_REPEATER_CHANNELS[round(476.4375 + 0.025 * n, 4)] = n + 41
 CB_INPUT_OFFSET_MHZ = 0.75
 CB_INPUT_CHANNEL_OFFSET = 30
+
+# Licence statuses that count as "licensed and currently active" (licence_status.csv in the zip).
+# The text is matched, not just the code, so a renumbered status table still works; the codes
+# are the fallback when licence_status.csv isn't in the zip.
+ACTIVE_STATUS_TEXTS = {"granted", "granted (under modification)"}
+FALLBACK_ACTIVE_STATUSES = {"1", "3"}
 
 # CSV files used from the zip (all are optional except device_details, licence and site)
 REQUIRED_FILES = ["device_details.csv", "licence.csv", "site.csv"]
@@ -263,13 +276,46 @@ def classify(mhz, service_text):
 
 
 # ---------------------------------------------------------------------------
+# Is the licence active?
+# ---------------------------------------------------------------------------
+def load_active_statuses(archive):
+    """Status codes whose text says the licence is in force (e.g. 1 = Granted)."""
+    table = load_by_key(archive, "licence_status.csv", "STATUS")
+    active = {code for code, row in table.items() if row.get("STATUS_TEXT", "").strip().lower() in ACTIVE_STATUS_TEXTS}
+    return active or FALLBACK_ACTIVE_STATUSES
+
+
+def parse_date(text):
+    """Dates in the RRL are ISO (YYYY-MM-DD). Returns None if empty or unreadable."""
+    try:
+        return date.fromisoformat((text or "").strip()[:10])
+    except ValueError:
+        return None
+
+
+def inactive_reason(licence, active_statuses, today):
+    """None if the licence is licensed and active on `today`, otherwise the reason it isn't."""
+    if licence.get("STATUS", "").strip() not in active_statuses:
+        return "licence not granted (" + (licence.get("STATUS_TEXT") or "no status") + ")"
+    effective = parse_date(licence.get("DATE_OF_EFFECT"))
+    if effective and effective > today:
+        return "licence not yet in effect"
+    expiry = parse_date(licence.get("DATE_OF_EXPIRY"))
+    if expiry and expiry < today:  # an empty expiry date means the licence is open-ended
+        return "licence expired"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Build the records
 # ---------------------------------------------------------------------------
-def select_devices(archive, args, licences, sites, service_names, subservice_names):
+def select_devices(archive, args, licences, sites, service_names, subservice_names, active_statuses):
     """Pass 1: stream device_details.csv and keep the rows the map needs."""
     print("Pass 1: finding the devices the map needs ...")
     kept = []
     skipped = defaultdict(int)
+    reason_by_licence = {}  # each licence is judged once, not once per device row
+    print(f"  keeping licences that are active on {args.as_of.isoformat()}")
     for number, row in enumerate(read_rows(archive, "device_details.csv"), start=1):
         if number % 250_000 == 0:
             print(f"  read {number:,} rows, kept {len(kept):,}", end="\r", flush=True)
@@ -277,8 +323,12 @@ def select_devices(archive, args, licences, sites, service_names, subservice_nam
         licence = licences.get(row.get("LICENCE_NO", ""))
         if licence is None:
             continue
-        if licence.get("STATUS", "1") not in ("1", ""):  # 1 = Granted
-            skipped["licence not granted"] += 1
+        licence_no = row.get("LICENCE_NO", "")
+        if licence_no not in reason_by_licence:
+            reason_by_licence[licence_no] = inactive_reason(licence, active_statuses, args.as_of)
+        reason = reason_by_licence[licence_no]
+        if reason:
+            skipped[reason] += 1
             continue
         if row.get("DEVICE_TYPE") == "R" and not args.include_receivers:
             skipped["receive-only"] += 1
@@ -346,7 +396,8 @@ def build_records(archive, args):
     service_names = {k: r.get("SV_NAME", "") for k, r in load_by_key(archive, "licence_service.csv", "SV_ID").items()}
     subservice_names = {k: r.get("SS_NAME", "") for k, r in load_by_key(archive, "licence_subservice.csv", "SS_ID").items()}
 
-    kept = select_devices(archive, args, licences, sites, service_names, subservice_names)
+    active_statuses = load_active_statuses(archive)
+    kept = select_devices(archive, args, licences, sites, service_names, subservice_names, active_statuses)
     if not kept:
         sys.exit("No devices matched. Run with --inspect and check the column names.")
 
@@ -485,9 +536,14 @@ def main():
     parser.add_argument("--keep-no-coords", action="store_true", help="keep devices whose site has no latitude/longitude")
     parser.add_argument("--include-receivers", action="store_true",
                         help="also write receive-only device rows (they are already listed under same_station_devices)")
+    parser.add_argument("--as-of", metavar="YYYY-MM-DD", help="judge which licences are active on this date (default: today)")
     parser.add_argument("--no-text", action="store_true", help="skip licence conditions (smaller file, less memory)")
     parser.add_argument("--no-pairs", action="store_true", help="skip same_station_devices (saves a pass)")
     args = parser.parse_args()
+    try:
+        args.as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+    except ValueError:
+        parser.error("--as-of must look like 2026-11-18")
 
     zip_path = Path(args.zip) if args.zip else download_zip(args.max_age_hours, args.force)
     with zipfile.ZipFile(zip_path) as archive:

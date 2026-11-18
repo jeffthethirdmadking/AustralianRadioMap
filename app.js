@@ -959,9 +959,9 @@ function roundedRectPath(ctx, x, y, width, height, radius) {
     ctx.closePath();
 }
 
-// A small white label with a shadow and a stripe in the station's colour. "centre" puts it on
-// (x, y); "above" sits it with its bottom edge at y.
-function drawLabel(ctx, lines, x, y, placement, accent) {
+// A small white label with a shadow. "centre" puts it on (x, y); "above" sits it with its
+// bottom edge at y.
+function drawLabel(ctx, lines, x, y, placement) {
     ctx.font = LABEL_FONT;
     const textWidth = Math.max(
         ...lines.map((text) => {
@@ -969,8 +969,8 @@ function drawLabel(ctx, lines, x, y, placement, accent) {
             return labelWidths.get(text);
         })
     );
-    const width = textWidth + 20;
-    const height = lines.length * LABEL_LINE_HEIGHT + 8;
+    const width = textWidth + 14;
+    const height = lines.length * LABEL_LINE_HEIGHT + 6;
     const left = x - width / 2;
     const top = placement === "above" ? y - height : y - height / 2;
 
@@ -990,15 +990,10 @@ function drawLabel(ctx, lines, x, y, placement, accent) {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.beginPath(); // colour stripe down the left edge
-    roundedRectPath(ctx, left + 4, top + 5, 3.5, height - 10, 1.75);
-    ctx.fillStyle = accent;
-    ctx.fill();
-
     ctx.fillStyle = "#1d1d1d";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    lines.forEach((text, index) => ctx.fillText(text, x + 4, top + 4 + LABEL_LINE_HEIGHT * (index + 0.5)));
+    lines.forEach((text, index) => ctx.fillText(text, x, top + 3 + LABEL_LINE_HEIGHT * (index + 0.5)));
 }
 
 // A line of round dots with a pale halo, so it reads on streets and satellite imagery alike
@@ -1170,8 +1165,7 @@ function paintOverlays(ctx, size, ratio) {
         const x = settings.showLines ? (userPoint.x + end.x) / 2 : end.x;
         const y = settings.showLines ? (userPoint.y + end.y) / 2 : end.y - (isEmergency(station) ? EMERGENCY_DOT_RADIUS : DOT_RADIUS) - 10;
         if (x < -80 || y < -80 || x > size.x + 80 || y > size.y + 80) return;
-        const accent = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
-        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above", accent);
+        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above");
     });
 }
 

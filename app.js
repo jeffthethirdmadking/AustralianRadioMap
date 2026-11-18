@@ -887,11 +887,13 @@ function paintOverlays(ctx, size) {
 
     if (!userPoint) return;
 
-    // Heading arrow while following the phone's compass
+    // Heading arrow while following the phone's compass. True north sits at +bearing on screen (the
+    // compass rose turns by the same amount), so the way you face is heading + bearing. Following
+    // turns the map to bearing = -heading, which puts the arrow straight up.
     if (settings.compassMode === "follow" && heading != null) {
         ctx.save();
         ctx.translate(userPoint.x, userPoint.y);
-        ctx.rotate(((heading - currentBearing()) * Math.PI) / 180);
+        ctx.rotate(((heading + currentBearing()) * Math.PI) / 180);
         ctx.beginPath();
         ctx.moveTo(0, -28);
         ctx.lineTo(10, -13);

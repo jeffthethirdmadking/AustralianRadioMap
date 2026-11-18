@@ -1563,6 +1563,12 @@ function applyFix(position) {
 }
 
 function handleGpsError(error) {
+    if (error.code === 1 && settings.liveGps) {
+        // Permission denied: live can't work, so turn it off and bring Find me back
+        settings.liveGps = false;
+        saveSettings();
+        updateLiveControls();
+    }
     statusMessage =
         error.code === 1
             ? "Location permission was denied. Allow location for this page, or enter a suburb above."
@@ -1606,18 +1612,27 @@ function startGps(options = {}) {
 
 const positionIsFromGps = () => !!(settings.location && settings.location.label === "Your location");
 
-// The "Live updates" chip
+// Shows the Live button's state. While live is on, tracking is already running, so Find me hides.
+function updateLiveControls() {
+    el("live").setAttribute("aria-pressed", settings.liveGps);
+    el("me").hidden = settings.liveGps;
+}
+
+// The Live button: on starts following you straight away (it takes the place of Find me),
+// off stops following and keeps the last position on screen
 function handleLiveToggle() {
-    settings.liveGps = el("olive").checked;
+    if (!settings.liveGps && !navigator.geolocation) {
+        statusMessage = "Location is not available in this browser. Enter a suburb above instead.";
+        return drawStations(false);
+    }
+    settings.liveGps = !settings.liveGps;
     saveSettings();
-    if (settings.liveGps && userPosition && positionIsFromGps()) {
-        startGps({ resume: true });
-    } else if (!settings.liveGps) {
+    updateLiveControls();
+    if (settings.liveGps) {
+        startGps({ resume: !!userPosition && positionIsFromGps() });
+    } else {
         stopGps();
         if (positionIsFromGps()) statusMessage = "Live updates off. Showing your last position.";
-        drawStations(false);
-    } else {
-        statusMessage = "Live updates on. Tap Find me to start.";
         drawStations(false);
     }
 }
@@ -1690,7 +1705,7 @@ function wireEvents() {
 
     el("addr").onsubmit = handleAddressSearch;
     el("me").onclick = () => startGps();
-    el("olive").addEventListener("change", handleLiveToggle);
+    el("live").onclick = handleLiveToggle;
     el("aq").addEventListener("input", () => {
         if (!el("aq").value.trim() && (userPosition || locationCandidates.length || statusMessage)) clearUserPosition();
     });
@@ -1758,7 +1773,7 @@ function wireEvents() {
 
 function applySettingsToControls() {
     el("q").value = settings.filterText;
-    el("olive").checked = settings.liveGps;
+    updateLiveControls();
     el("olines").checked = settings.showLines;
     el("olabels").checked = settings.showDistanceLabels;
     el("ochan").checked = settings.showChannelLabels;
@@ -1821,14 +1836,22 @@ async function init() {
         updateCompass();
     }
 
-    // Live updates were on last time: pick the GPS back up if the browser already allows location
-    if (settings.liveGps && positionIsFromGps() && navigator.permissions) {
-        navigator.permissions
-            .query({ name: "geolocation" })
-            .then((result) => {
-                if (result.state === "granted") startGps({ resume: true });
-            })
-            .catch(() => {});
+    // Live updates were on last time: carry on if the browser already allows location,
+    // otherwise switch it off so Find me is available again
+    if (settings.liveGps) {
+        const turnOff = () => {
+            settings.liveGps = false;
+            saveSettings();
+            updateLiveControls();
+        };
+        if (positionIsFromGps() && navigator.permissions) {
+            navigator.permissions
+                .query({ name: "geolocation" })
+                .then((result) => (result.state === "granted" ? startGps({ resume: true }) : turnOff()))
+                .catch(turnOff);
+        } else {
+            turnOff();
+        }
     }
 }
 

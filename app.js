@@ -67,6 +67,7 @@ const DEFAULT_SETTINGS = {
     showChannelLabels: true,
     baseMap: "Streets (Esri)",
     compassMode: "north", // "north" or "follow"
+    liveGps: false, // true: keep following your position; false: take one reading
     location: null, // { lat, lon, label, query }
     view: null, // { lat, lon, zoom }
 };
@@ -560,16 +561,24 @@ const RecenterControl = L.Control.extend({
 });
 new RecenterControl().addTo(map);
 
+let lastRoseAngle = null;
+let lastCompassLabel = "";
 function updateCompass() {
     const following = settings.compassMode === "follow";
     // The rose turns so "N" always points at true north, whatever way the map is turned
     let roseAngle = 0;
     if (rotationSupported) roseAngle = currentBearing();
     else if (following && heading != null) roseAngle = -heading;
-    el("compassRose").setAttribute("transform", `rotate(${roseAngle} 50 50)`);
-    el("compassBtn").textContent = following ? "Following compass" : "North locked";
-    el("compassBtn").setAttribute("aria-pressed", following);
-    requestStationRepaint();
+    if (roseAngle !== lastRoseAngle) {
+        lastRoseAngle = roseAngle;
+        el("compassRose").setAttribute("transform", `rotate(${roseAngle} 50 50)`);
+    }
+    const label = following ? "Following compass" : "North locked";
+    if (label !== lastCompassLabel) {
+        lastCompassLabel = label;
+        el("compassBtn").textContent = label;
+        el("compassBtn").setAttribute("aria-pressed", following);
+    }
 }
 
 function setMapBearing(degrees) {
@@ -582,6 +591,7 @@ function leaveFollowMode() {
     settings.compassMode = "north";
     stopCompass();
     saveSettings();
+    requestStationRepaint(); // the heading arrow goes away
 }
 
 function pointMapNorth() {
@@ -603,6 +613,7 @@ function handleOrientation(event) {
         if (difference > 2) setMapBearing(-value); // ignore sensor jitter
     }
     updateCompass();
+    requestStationRepaint(); // the heading arrow
 }
 
 async function startCompass() {
@@ -706,14 +717,201 @@ stationCanvas.className = "station-canvas";
 stationCanvas.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:401;transform-origin:0 0;";
 map.getContainer().appendChild(stationCanvas);
 
-let visibleStations = []; // stations passing the current filters
-let drawnPoints = []; // { x, y, station } for the dots painted last frame, used for taps
-let repaintQueued = false;
+const MAX_PIXEL_RATIO = 2; // 3x phone screens look the same at 2x and paint far faster
+const DOT_RADIUS = 6.5;
+const EMERGENCY_DOT_RADIUS = 8.5;
+const DOT_RING_WIDTH = 1.5;
+const SPRITE_PADDING = 6; // room around a dot for its halo
+const USER_DOT_RADIUS = 9;
+const USER_COLOUR = "#1a73e8";
 
+let visibleStations = []; // stations passing the current filters
+let visibleWorld = new Float64Array(0); // x, y of each visible station in unit Web Mercator (0 to 1)
+let visibleGroups = []; // [{ colour, radius, emergency, indices }]: one group per dot style
+let repaintQueued = false;
+let lastPaintedView = null;
+
+// ---------------------------------------------------------------------------
+// Fast projection. Leaflet's latLngToContainerPoint is slow (it allocates and, with the rotate
+// plugin, rotates every point), and a map can have thousands of dots. Every station's position
+// is worked out once as unit Web Mercator. Each frame we then ask Leaflet where three reference
+// points land on screen and derive a plain affine transform, which also covers rotation. Placing
+// a dot is then four multiplications.
+// ---------------------------------------------------------------------------
+
+function unitMercator(lat, lon) {
+    const sine = Math.sin((lat * Math.PI) / 180);
+    return [(lon + 180) / 360, 0.5 - Math.log((1 + sine) / (1 - sine)) / (4 * Math.PI)];
+}
+
+function getViewTransform() {
+    const zoom = map.getZoom();
+    const centre = map.getCenter();
+    const centreWorld = map.project(centre, zoom);
+    const origin = map.latLngToContainerPoint(centre);
+    const probe = 256;
+    const alongX = map.latLngToContainerPoint(map.unproject(centreWorld.add([probe, 0]), zoom));
+    const alongY = map.latLngToContainerPoint(map.unproject(centreWorld.add([0, probe]), zoom));
+    return {
+        scale: 256 * 2 ** zoom,
+        centreX: centreWorld.x,
+        centreY: centreWorld.y,
+        originX: origin.x,
+        originY: origin.y,
+        xx: (alongX.x - origin.x) / probe,
+        xy: (alongX.y - origin.y) / probe,
+        yx: (alongY.x - origin.x) / probe,
+        yy: (alongY.y - origin.y) / probe,
+    };
+}
+
+function toScreen(view, u, v, out) {
+    const dx = u * view.scale - view.centreX;
+    const dy = v * view.scale - view.centreY;
+    out.x = view.originX + view.xx * dx + view.yx * dy;
+    out.y = view.originY + view.xy * dx + view.yy * dy;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Dot sprites. Each dot style is drawn once to a small canvas (shadow, white ring, shaded body)
+// and stamped onto the map with drawImage, which is much cheaper than rebuilding paths.
+// ---------------------------------------------------------------------------
+
+const spriteCache = new Map();
+
+function makeSprite(key, radius, ratio, draw) {
+    if (spriteCache.has(key)) return spriteCache.get(key);
+    const cssSize = (radius + SPRITE_PADDING) * 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = Math.ceil(cssSize * ratio);
+    const c = canvas.getContext("2d");
+    c.scale(canvas.width / cssSize, canvas.width / cssSize);
+    draw(c, cssSize / 2);
+    const sprite = { canvas, size: canvas.width / ratio };
+    spriteCache.set(key, sprite);
+    return sprite;
+}
+
+function dotSprite(colour, radius, emergency, ratio) {
+    return makeSprite(`dot|${colour}|${radius}|${emergency}|${ratio}`, radius, ratio, (c, centre) => {
+        if (emergency) {
+            c.beginPath(); // pale halo so channel 5 stands out
+            c.arc(centre, centre, radius + 4.5, 0, TAU);
+            c.fillStyle = "rgba(179,38,30,0.2)";
+            c.fill();
+        }
+        c.beginPath(); // white ring
+        c.arc(centre, centre, radius + DOT_RING_WIDTH, 0, TAU);
+        c.fillStyle = "#fff";
+        c.fill();
+        c.beginPath(); // flat colour
+        c.arc(centre, centre, radius, 0, TAU);
+        c.fillStyle = colour;
+        c.fill();
+        if (emergency) {
+            c.fillStyle = "#fff";
+            c.font = `800 ${Math.round(radius * 1.3)}px system-ui, sans-serif`;
+            c.textAlign = "center";
+            c.textBaseline = "middle";
+            c.fillText("!", centre, centre + 0.5);
+        }
+    });
+}
+
+function userSprite(ratio) {
+    return makeSprite(`user|${ratio}`, USER_DOT_RADIUS + 8, ratio, (c, centre) => {
+        c.beginPath(); // pale ring around your dot
+        c.arc(centre, centre, USER_DOT_RADIUS + 8, 0, TAU);
+        c.fillStyle = "rgba(26,115,232,0.16)";
+        c.fill();
+        c.beginPath(); // white ring
+        c.arc(centre, centre, USER_DOT_RADIUS + 2.5, 0, TAU);
+        c.fillStyle = "#fff";
+        c.fill();
+        c.beginPath(); // flat blue
+        c.arc(centre, centre, USER_DOT_RADIUS, 0, TAU);
+        c.fillStyle = USER_COLOUR;
+        c.fill();
+    });
+}
+
+// Work out each visible station's position and dot style once per filter change, not per frame
+function buildVisibleIndex() {
+    visibleWorld = new Float64Array(visibleStations.length * 2);
+    const byStyle = new Map();
+    visibleStations.forEach((station, index) => {
+        const [u, v] = unitMercator(station[FIELD.lat], station[FIELD.lon]);
+        visibleWorld[index * 2] = u;
+        visibleWorld[index * 2 + 1] = v;
+        const emergency = isEmergency(station);
+        const colour = emergency ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+        const key = colour + "|" + emergency;
+        if (!byStyle.has(key)) {
+            byStyle.set(key, { colour, emergency, radius: emergency ? EMERGENCY_DOT_RADIUS : DOT_RADIUS, indices: [] });
+        }
+        byStyle.get(key).indices.push(index);
+    });
+    // Emergency dots last, so they sit on top
+    visibleGroups = [...byStyle.values()].sort((a, b) => a.emergency - b.emergency);
+}
+
+// Positions for the nearest-station lines and your own dot, cached until they change
+let cachedNearest = null;
+let nearestWorld = new Float64Array(0);
+function nearestUnits() {
+    if (cachedNearest !== nearestShown) {
+        cachedNearest = nearestShown;
+        nearestWorld = new Float64Array(nearestShown.length * 2);
+        nearestShown.forEach(({ station }, index) => {
+            const [u, v] = unitMercator(station[FIELD.lat], station[FIELD.lon]);
+            nearestWorld[index * 2] = u;
+            nearestWorld[index * 2 + 1] = v;
+        });
+    }
+    return nearestWorld;
+}
+let cachedUserPosition = null;
+let cachedUserUnit = null;
+function userUnits() {
+    if (cachedUserPosition !== userPosition) {
+        cachedUserPosition = userPosition;
+        cachedUserUnit = userPosition ? unitMercator(userPosition[0], userPosition[1]) : null;
+    }
+    return cachedUserUnit;
+}
+
+// ---------------------------------------------------------------------------
+// Repainting
+// ---------------------------------------------------------------------------
+
+// For data changes (filters, your position): repaint on the next frame
 function requestStationRepaint() {
+    lastPaintedView = null;
     if (repaintQueued) return;
     repaintQueued = true;
     requestAnimationFrame(paintStations);
+}
+
+// For map movement: repaint right now, inside the same event the tiles move in. Scheduling it
+// for the next frame (as before) always left the dots one frame behind the map. Events that
+// leave the view unchanged (moveend after a pan, say) are skipped.
+function repaintForViewChange() {
+    const centre = map.getCenter();
+    const size = map.getSize();
+    const last = lastPaintedView;
+    if (
+        last &&
+        last.zoom === map.getZoom() &&
+        last.lat === centre.lat &&
+        last.lng === centre.lng &&
+        last.bearing === currentBearing() &&
+        last.width === size.x &&
+        last.height === size.y
+    ) {
+        return;
+    }
+    paintStations();
 }
 
 // The areas the open popup covers (its box and its tip), in screen coordinates. This canvas sits
@@ -735,7 +933,7 @@ function openPopupHoles() {
 
 const LABEL_FONT = "600 12px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 const LABEL_LINE_HEIGHT = 15;
-const USER_DOT_RADIUS = 9;
+const labelWidths = new Map(); // measuring text is slow, so remember each line's width
 
 // Text lines for a station's label: distance, then RX / TX, as chosen in the line options
 function labelLines(km, station) {
@@ -761,23 +959,65 @@ function roundedRectPath(ctx, x, y, width, height, radius) {
     ctx.closePath();
 }
 
-// A small white label. "centre" puts it on (x, y); "above" sits it with its bottom edge at y.
-function drawLabel(ctx, lines, x, y, placement) {
+// A small white label with a shadow and a stripe in the station's colour. "centre" puts it on
+// (x, y); "above" sits it with its bottom edge at y.
+function drawLabel(ctx, lines, x, y, placement, accent) {
     ctx.font = LABEL_FONT;
-    const width = Math.max(...lines.map((text) => ctx.measureText(text).width)) + 12;
-    const height = lines.length * LABEL_LINE_HEIGHT + 6;
+    const textWidth = Math.max(
+        ...lines.map((text) => {
+            if (!labelWidths.has(text)) labelWidths.set(text, ctx.measureText(text).width);
+            return labelWidths.get(text);
+        })
+    );
+    const width = textWidth + 20;
+    const height = lines.length * LABEL_LINE_HEIGHT + 8;
+    const left = x - width / 2;
     const top = placement === "above" ? y - height : y - height / 2;
+
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,0.28)";
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 2;
     ctx.beginPath();
-    roundedRectPath(ctx, x - width / 2, top, width, height, 5);
-    ctx.fillStyle = "rgba(255,255,255,0.93)";
+    roundedRectPath(ctx, left, top, width, height, 7);
+    ctx.fillStyle = "rgba(255,255,255,0.96)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    ctx.restore();
+
+    ctx.beginPath();
+    roundedRectPath(ctx, left, top, width, height, 7);
+    ctx.strokeStyle = "rgba(0,0,0,0.14)";
     ctx.lineWidth = 1;
     ctx.stroke();
+
+    ctx.beginPath(); // colour stripe down the left edge
+    roundedRectPath(ctx, left + 4, top + 5, 3.5, height - 10, 1.75);
+    ctx.fillStyle = accent;
+    ctx.fill();
+
     ctx.fillStyle = "#1d1d1d";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    lines.forEach((text, index) => ctx.fillText(text, x, top + 3 + LABEL_LINE_HEIGHT * (index + 0.5)));
+    lines.forEach((text, index) => ctx.fillText(text, x + 4, top + 4 + LABEL_LINE_HEIGHT * (index + 0.5)));
+}
+
+// A line of round dots with a pale halo, so it reads on streets and satellite imagery alike
+function strokeDottedLine(ctx, x0, y0, x1, y1, colour) {
+    ctx.lineCap = "round";
+    ctx.setLineDash([0.01, 10]); // zero-length dashes with round caps are dots
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.stroke();
+    const gradient = ctx.createLinearGradient(x0, y0, x1, y1);
+    gradient.addColorStop(0, USER_COLOUR);
+    gradient.addColorStop(1, colour);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = gradient;
+    ctx.stroke();
+    ctx.setLineDash([]);
 }
 
 const metresToPixels = (metres, latitude) =>
@@ -786,7 +1026,7 @@ const metresToPixels = (metres, latitude) =>
 function paintStations() {
     repaintQueued = false;
     const size = map.getSize();
-    const ratio = window.devicePixelRatio || 1;
+    const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     const pixelWidth = Math.round(size.x * ratio);
     const pixelHeight = Math.round(size.y * ratio);
     if (stationCanvas.width !== pixelWidth || stationCanvas.height !== pixelHeight) {
@@ -800,9 +1040,8 @@ function paintStations() {
     stationCanvas.style.visibility = "visible";
 
     const ctx = stationCanvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.setTransform(pixelWidth / size.x, 0, 0, pixelHeight / size.y, 0, 0);
     ctx.clearRect(0, 0, size.x, size.y);
-    drawnPoints = [];
 
     // Everything below is painted with the open popup's area cut out, so the popup stays on top
     const holes = openPopupHoles();
@@ -813,18 +1052,26 @@ function paintStations() {
         holes.forEach((hole) => roundedRectPath(ctx, hole.x, hole.y, hole.width, hole.height, hole.radius));
         ctx.clip("evenodd");
     }
-    paintOverlays(ctx, size);
+    paintOverlays(ctx, size, ratio);
     ctx.restore();
+
+    const centre = map.getCenter();
+    lastPaintedView = { zoom: map.getZoom(), lat: centre.lat, lng: centre.lng, bearing: currentBearing(), width: size.x, height: size.y };
 }
 
-function paintOverlays(ctx, size) {
-    // Your position and the nearest stations, as screen points (re-projected every frame)
-    const userPoint = userPosition ? map.latLngToContainerPoint(userPosition) : null;
+function paintOverlays(ctx, size, ratio) {
+    const view = getViewTransform();
+    const point = { x: 0, y: 0 };
+
+    // Your position and the nearest stations, as screen points
+    const userUnit = userUnits();
+    const userPoint = userUnit ? toScreen(view, userUnit[0], userUnit[1], { x: 0, y: 0 }) : null;
+    const nearestUnit = userPoint ? nearestUnits() : null;
     const nearestPoints = userPoint
-        ? nearestShown.map(({ km, station }) => ({
+        ? nearestShown.map(({ km, station }, index) => ({
               km,
               station,
-              point: map.latLngToContainerPoint([station[FIELD.lat], station[FIELD.lon]]),
+              point: toScreen(view, nearestUnit[index * 2], nearestUnit[index * 2 + 1], { x: 0, y: 0 }),
           }))
         : [];
     const labelled = nearestPoints.length <= MAX_LABELLED_LINES; // labels on hundreds of lines are unreadable
@@ -834,56 +1081,59 @@ function paintOverlays(ctx, size) {
         ctx.arc(userPoint.x, userPoint.y, metresToPixels(userAccuracy, userPosition[0]), 0, TAU);
         ctx.fillStyle = "rgba(26,115,232,0.1)";
         ctx.fill();
-        ctx.strokeStyle = "#1a73e8";
+        ctx.strokeStyle = "rgba(26,115,232,0.55)";
         ctx.lineWidth = 1;
         ctx.stroke();
     }
+
     if (userPoint && settings.showLines) {
-        ctx.setLineDash([7, 7]);
-        ctx.lineWidth = labelled ? 3 : 1.5;
-        ctx.globalAlpha = labelled ? 0.85 : 0.5;
-        nearestPoints.forEach(({ station, point }) => {
-            ctx.strokeStyle = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
-            ctx.beginPath();
-            ctx.moveTo(userPoint.x, userPoint.y);
-            ctx.lineTo(point.x, point.y);
-            ctx.stroke();
-        });
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
+        if (labelled) {
+            nearestPoints.forEach(({ station, point: end }) =>
+                strokeDottedLine(ctx, userPoint.x, userPoint.y, end.x, end.y, isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]])
+            );
+        } else {
+            // Hundreds of lines: thin solid lines, one stroke per colour
+            const byColour = new Map();
+            nearestPoints.forEach(({ station, point: end }) => {
+                const colour = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+                if (!byColour.has(colour)) byColour.set(colour, []);
+                byColour.get(colour).push(end);
+            });
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.45;
+            byColour.forEach((ends, colour) => {
+                ctx.beginPath();
+                ends.forEach((end) => {
+                    ctx.moveTo(userPoint.x, userPoint.y);
+                    ctx.lineTo(end.x, end.y);
+                });
+                ctx.strokeStyle = colour;
+                ctx.stroke();
+            });
+            ctx.globalAlpha = 1;
+        }
     }
 
-    const batches = new Map(); // "colour|radius" -> points, so each colour is one fill
-    for (const station of visibleStations) {
-        const point = map.latLngToContainerPoint([station[FIELD.lat], station[FIELD.lon]]);
-        if (point.x < -12 || point.y < -12 || point.x > size.x + 12 || point.y > size.y + 12) continue;
-        const emergency = isEmergency(station);
-        const key = (emergency ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]]) + "|" + (emergency ? 8 : 6);
-        if (!batches.has(key)) batches.set(key, []);
-        batches.get(key).push(point);
-        drawnPoints.push({ x: point.x, y: point.y, station });
+    // Station dots
+    for (const group of visibleGroups) {
+        const sprite = dotSprite(group.colour, group.radius, group.emergency, ratio);
+        const half = sprite.size / 2;
+        const margin = half + 2;
+        const indices = group.indices;
+        for (let k = 0; k < indices.length; k++) {
+            const index = indices[k];
+            toScreen(view, visibleWorld[index * 2], visibleWorld[index * 2 + 1], point);
+            if (point.x < -margin || point.y < -margin || point.x > size.x + margin || point.y > size.y + margin) continue;
+            // Snap to whole device pixels so the sprite stays sharp
+            ctx.drawImage(
+                sprite.canvas,
+                Math.round((point.x - half) * ratio) / ratio,
+                Math.round((point.y - half) * ratio) / ratio,
+                sprite.size,
+                sprite.size
+            );
+        }
     }
-
-    batches.forEach((points, key) => {
-        const [colour, radiusText] = key.split("|");
-        const radius = +radiusText;
-        ctx.fillStyle = "#fff"; // white ring
-        ctx.beginPath();
-        points.forEach((p) => {
-            ctx.moveTo(p.x + radius + 0.75, p.y);
-            ctx.arc(p.x, p.y, radius + 0.75, 0, TAU);
-        });
-        ctx.fill();
-        ctx.globalAlpha = 0.9;
-        ctx.fillStyle = colour;
-        ctx.beginPath();
-        points.forEach((p) => {
-            ctx.moveTo(p.x + radius - 0.75, p.y);
-            ctx.arc(p.x, p.y, radius - 0.75, 0, TAU);
-        });
-        ctx.fill();
-        ctx.globalAlpha = 1;
-    });
 
     if (!userPoint) return;
 
@@ -895,42 +1145,40 @@ function paintOverlays(ctx, size) {
         ctx.translate(userPoint.x, userPoint.y);
         ctx.rotate(((heading + currentBearing()) * Math.PI) / 180);
         ctx.beginPath();
-        ctx.moveTo(0, -28);
-        ctx.lineTo(10, -13);
-        ctx.lineTo(-10, -13);
+        ctx.moveTo(0, -30);
+        ctx.lineTo(11, -13);
+        ctx.lineTo(-11, -13);
         ctx.closePath();
         ctx.fillStyle = "rgba(26,115,232,0.9)";
         ctx.fill();
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 1.5;
+        ctx.lineJoin = "round";
         ctx.stroke();
         ctx.restore();
     }
 
     // Your dot
-    ctx.beginPath();
-    ctx.arc(userPoint.x, userPoint.y, USER_DOT_RADIUS, 0, TAU);
-    ctx.fillStyle = "#1a73e8";
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 3;
-    ctx.stroke();
+    const user = userSprite(ratio);
+    ctx.drawImage(user.canvas, userPoint.x - user.size / 2, userPoint.y - user.size / 2, user.size, user.size);
 
     // Labels last, so they sit on top. On the line when lines are drawn, otherwise above each marker.
     if (!labelled) return;
-    nearestPoints.forEach(({ km, station, point }) => {
+    nearestPoints.forEach(({ km, station, point: end }) => {
         const lines = labelLines(km, station);
         if (!lines.length) return;
-        const x = settings.showLines ? (userPoint.x + point.x) / 2 : point.x;
-        const y = settings.showLines ? (userPoint.y + point.y) / 2 : point.y - (isEmergency(station) ? 8 : 6) - 8;
+        const x = settings.showLines ? (userPoint.x + end.x) / 2 : end.x;
+        const y = settings.showLines ? (userPoint.y + end.y) / 2 : end.y - (isEmergency(station) ? EMERGENCY_DOT_RADIUS : DOT_RADIUS) - 10;
         if (x < -80 || y < -80 || x > size.x + 80 || y > size.y + 80) return;
-        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above");
+        const accent = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above", accent);
     });
 }
 
 // Animated zooms (buttons, double tap, the snap at the end of a pinch): slide the canvas along
 // with the tiles. When the map is rotated the maths differs, so just hide the dots until it lands.
 map.on("zoomanim", (event) => {
+    lastPaintedView = null; // the canvas is about to be moved, so the next map event must repaint it
     if (rotationSupported && Math.abs(currentBearing()) > 0.01) {
         stationCanvas.style.visibility = "hidden";
         return;
@@ -944,7 +1192,8 @@ map.on("zoomanim", (event) => {
     stationCanvas.style.transition = "transform 0.25s cubic-bezier(0, 0, 0.25, 1)";
     stationCanvas.style.transform = `translate(${shiftX}px, ${shiftY}px) scale(${scale})`;
 });
-map.on("move zoom zoomend moveend resize viewreset rotate popupopen popupclose", requestStationRepaint);
+map.on("move zoom rotate resize viewreset zoomend moveend", repaintForViewChange);
+map.on("popupopen popupclose", requestStationRepaint);
 
 // Tapping the map opens the nearest dot's popup (the dots are painted, so they have no click events)
 map.on("click", (event) => {
@@ -957,25 +1206,30 @@ map.on("click", (event) => {
             return;
         }
     }
-    let best = null;
+    const view = getViewTransform();
+    const point = { x: 0, y: 0 };
+    let bestIndex = -1;
     let bestDistance = reach * reach;
-    drawnPoints.forEach((dot) => {
-        const distance = (dot.x - tap.x) ** 2 + (dot.y - tap.y) ** 2;
+    for (let index = 0; index < visibleStations.length; index++) {
+        toScreen(view, visibleWorld[index * 2], visibleWorld[index * 2 + 1], point);
+        const distance = (point.x - tap.x) ** 2 + (point.y - tap.y) ** 2;
         if (distance < bestDistance) {
             bestDistance = distance;
-            best = dot;
+            bestIndex = index;
         }
-    });
-    if (best) {
+    }
+    if (bestIndex >= 0) {
+        const station = visibleStations[bestIndex];
         L.popup()
-            .setLatLng([best.station[FIELD.lat], best.station[FIELD.lon]])
-            .setContent(popupHtml(best.station))
+            .setLatLng([station[FIELD.lat], station[FIELD.lon]])
+            .setContent(popupHtml(station))
             .openOn(map);
     }
 });
 
 function drawStations(fitToResults) {
     visibleStations = filteredStations();
+    buildVisibleIndex();
     requestStationRepaint();
 
     if (fitToResults && visibleStations.length) {
@@ -1277,39 +1531,95 @@ function clearUserPosition() {
     drawStations(false);
 }
 
-function startGps() {
+// ---------------------------------------------------------------------------
+// GPS. The position comes from the browser's Geolocation API. getCurrentPosition takes one reading;
+// watchPosition keeps calling back every time the device reports a new fix. "Live updates" in the
+// Location options picks between the two. Both go through applyFix().
+// ---------------------------------------------------------------------------
+
+const LIVE_MIN_MOVE_METRES = 5; // smaller changes are GPS jitter, so only the accuracy circle is refreshed
+const SAVE_MIN_MOVE_METRES = 25; // how far you move before the saved location is rewritten
+let lastFix = null; // [lat, lon] of the last position that was applied
+
+function applyFix(position) {
+    statusMessage = "";
+    const here = [position.coords.latitude, position.coords.longitude];
+    const movedMetres = lastFix ? distanceKm(lastFix, here) * 1000 : Infinity;
+
+    if (movedMetres < LIVE_MIN_MOVE_METRES && userPosition) {
+        userAccuracy = position.coords.accuracy;
+        requestStationRepaint();
+        return;
+    }
+    lastFix = here;
+    setUserPosition(here, "You are here", position.coords.accuracy);
+    if (firstFixPending || movedMetres > SAVE_MIN_MOVE_METRES) rememberLocation("Your location", "");
+    if (firstFixPending) {
+        map.setView(userPosition, 9); // only the first fix moves the map; use the recentre button after that
+        firstFixPending = false;
+    }
+    drawStations(false);
+    updateNearest();
+}
+
+function handleGpsError(error) {
+    statusMessage =
+        error.code === 1
+            ? "Location permission was denied. Allow location for this page, or enter a suburb above."
+            : "Couldn’t get your location. Check GPS or signal, or enter a suburb above.";
+    drawStations(false);
+}
+
+// options.resume: carry on from the position already on screen (no "finding" message, no recentre)
+function startGps(options = {}) {
     if (!navigator.geolocation) {
         statusMessage = "Location is not available in this browser. Enter a suburb above instead.";
         return drawStations(false);
     }
     stopGps();
-    firstFixPending = true;
-    statusMessage = "Finding your location…";
-    locationCandidates = [];
-    renderAlternatives();
-    drawStations(false);
+    if (options.resume) {
+        firstFixPending = false;
+        lastFix = userPosition;
+    } else {
+        firstFixPending = true;
+        lastFix = null;
+        statusMessage = "Finding your location…";
+        locationCandidates = [];
+        renderAlternatives();
+        drawStations(false);
+    }
 
-    geolocationWatchId = navigator.geolocation.watchPosition(
-        (position) => {
-            statusMessage = "";
-            setUserPosition([position.coords.latitude, position.coords.longitude], "You are here", position.coords.accuracy);
-            rememberLocation("Your location", "");
-            if (firstFixPending) {
-                map.setView(userPosition, 9);
-                firstFixPending = false;
-            }
-            drawStations(false);
-            updateNearest();
-        },
-        (error) => {
-            statusMessage =
-                error.code === 1
-                    ? "Location permission was denied. Allow location for this page, or enter a suburb above."
-                    : "Couldn’t get your location. Check GPS or signal, or enter a suburb above.";
-            drawStations(false);
-        },
-        { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 }
-    );
+    if (settings.liveGps) {
+        geolocationWatchId = navigator.geolocation.watchPosition(applyFix, handleGpsError, {
+            enableHighAccuracy: true,
+            maximumAge: 2000,
+            timeout: 30000,
+        });
+    } else {
+        navigator.geolocation.getCurrentPosition(applyFix, handleGpsError, {
+            enableHighAccuracy: true,
+            maximumAge: 10000,
+            timeout: 30000,
+        });
+    }
+}
+
+const positionIsFromGps = () => !!(settings.location && settings.location.label === "Your location");
+
+// The "Live updates" chip
+function handleLiveToggle() {
+    settings.liveGps = el("olive").checked;
+    saveSettings();
+    if (settings.liveGps && userPosition && positionIsFromGps()) {
+        startGps({ resume: true });
+    } else if (!settings.liveGps) {
+        stopGps();
+        if (positionIsFromGps()) statusMessage = "Live updates off. Showing your last position.";
+        drawStations(false);
+    } else {
+        statusMessage = "Live updates on. Tap Find me to start.";
+        drawStations(false);
+    }
 }
 
 async function handleAddressSearch(event) {
@@ -1379,7 +1689,8 @@ function wireEvents() {
     });
 
     el("addr").onsubmit = handleAddressSearch;
-    el("me").onclick = startGps;
+    el("me").onclick = () => startGps();
+    el("olive").addEventListener("change", handleLiveToggle);
     el("aq").addEventListener("input", () => {
         if (!el("aq").value.trim() && (userPosition || locationCandidates.length || statusMessage)) clearUserPosition();
     });
@@ -1447,6 +1758,7 @@ function wireEvents() {
 
 function applySettingsToControls() {
     el("q").value = settings.filterText;
+    el("olive").checked = settings.liveGps;
     el("olines").checked = settings.showLines;
     el("olabels").checked = settings.showDistanceLabels;
     el("ochan").checked = settings.showChannelLabels;
@@ -1507,6 +1819,16 @@ async function init() {
         // Browsers (iOS especially) need a tap to start the compass again
         settings.compassMode = "north";
         updateCompass();
+    }
+
+    // Live updates were on last time: pick the GPS back up if the browser already allows location
+    if (settings.liveGps && positionIsFromGps() && navigator.permissions) {
+        navigator.permissions
+            .query({ name: "geolocation" })
+            .then((result) => {
+                if (result.state === "granted") startGps({ resume: true });
+            })
+            .catch(() => {});
     }
 }
 

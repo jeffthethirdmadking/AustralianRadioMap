@@ -612,46 +612,6 @@ details.box {
     padding: 3px 0;
 }
 
-/* Distance chart */
-.dist-chart {
-    display: grid;
-    gap: 6px;
-    margin-top: 10px;
-}
-.bar-row {
-    display: grid;
-    grid-template-columns: minmax(90px, 38%) 1fr auto;
-    gap: 8px;
-    align-items: center;
-    font-size: 0.9rem;
-}
-.bar-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.bar-track {
-    height: 14px;
-    background: var(--bg);
-    border-radius: 7px;
-    overflow: hidden;
-}
-.bar-fill {
-    display: block;
-    height: 100%;
-    border-radius: 7px;
-}
-.bar-km {
-    font-weight: 700;
-    min-width: 52px;
-    text-align: right;
-}
-.bar-note {
-    color: var(--muted);
-    font-size: 0.85rem;
-    margin: 4px 0 0;
-}
-
 /* ---- Settings section (API keys and, later, other options) ---- */
 .settings-body h2 {
     font-size: 1rem;
@@ -716,4 +676,68 @@ details.box {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-ink);
+}
+
+/* ---- Address search is switched off (disabled and greyed out). Everything stays on one line ---- */
+.controls .addr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.controls .addr input {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+}
+.controls .addr .buttons {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+}
+.controls .addr .buttons .me {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 64px;
+    padding: 0 12px;
+}
+.controls .addr input:disabled,
+.controls .addr .me:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+    filter: brightness(0.78) saturate(0.35);
+}
+@media (max-width: 600px) {
+    .controls .addr .buttons .me {
+        min-width: 0;
+        padding: 0 9px;
+    }
+}
+
+/* ---- Address row lines up with the repeater search row: the buttons are as wide as the channel dropdown ---- */
+.controls .addr .buttons {
+    flex: 0 0 232px;
+    width: 232px;
+}
+.controls .addr .buttons .me {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 4px;
+}
+@media (max-width: 600px) {
+    .controls .addr .buttons {
+        flex-basis: 40%;
+        width: 40%;
+    }
+}
+
+/* ---- While Live is on the matches list is greyed out as well ---- */
+.alts.is-disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+    filter: brightness(0.78) saturate(0.35);
+    pointer-events: none;
+}
+
+.note a {
+    color: var(--accent);
 }

@@ -5,7 +5,18 @@
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Australian radio stations: street map</title>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+        <link rel="manifest" href="/manifest.webmanifest">
         <link rel="stylesheet" href="style.css" />
+
+        <script>
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/service_worker.js')
+                    .then((reg) => console.log('Service worker registered', reg))
+                    .catch((err) => console.error('Service worker failed:', err));
+                });
+            }
+        </script>
     </head>
     <body>
         <main>
@@ -21,12 +32,12 @@
                     <input
                         id="aq"
                         type="search"
-                        placeholder="Suburb or address, e.g. Broken Hill NSW"
+                        placeholder="Suburb or address"
                         aria-label="Suburb or address"
                         autocomplete="off"
                     />
                     <div class="buttons">
-                        <button class="me" type="submit">Search</button>
+                        <button class="me" id="search" type="submit">Search</button>
                         <button class="me" id="me" type="button">Find me</button>
                         <button class="me live" id="live" type="button" aria-pressed="false">Live</button>
                     </div>
@@ -62,34 +73,30 @@
                 <summary id="nearSummary">Nearest to you</summary>
                 <div class="near" id="near"></div>
             </details>
-            <details class="box" id="chartBox" hidden>
-                <summary id="chartSummary">Distance chart</summary>
-                <div id="distChart" class="dist-chart"></div>
-            </details>
             <p class="note">
-                Licensed entries from the ACMA register, not live status. Channel 5 repeaters are for emergencies only.
-                Distances are straight-line, not driving distance. For UHF CB, RX is the channel you listen on and TX
-                is the channel you transmit on (30 higher). Other station types show the frequency
-                the station transmits on. The ACMA data has no UHF CB channel numbers, so they are worked out from the repeater&rsquo;s output frequency. Press the duplex button on your radio to use a repeater.
+                Licensed entries from the ACMA register, not live status. Distances are straight-line. For UHF CB, RX
+                is the channel you listen on and TX is the channel you transmit on (30 higher). Channel numbers are
+                worked out from the output frequency. Channel 5 is for emergencies only.
             </p>
             <p class="note">
-                <strong>AI disclosure:</strong> this page was written and modified with the help of Claude, an AI assistant made by Anthropic. The code and the way the register data was processed (including how station type is worked out) may contain mistakes. Check details against the official register before relying on them, and never rely on this page alone in an emergency.
+                <strong>AI disclosure:</strong> built with the help of Claude, an AI assistant made by Anthropic, so it
+                may contain mistakes. Check details against the official register, and never rely on this page alone in
+                an emergency.
             </p>
-            <section class="about box" style="border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-top:16px">
-                <h2>Data sources</h2>
-                <p id="datasource"></p>
-                <ul>
-                    <li><a href="https://www.acma.gov.au/radiocomms-licence-data" target="_blank" rel="noopener">ACMA Register of Radiocommunications Licences</a>: source of the station data</li>
-                    <li><a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a> (via <a href="https://cdnjs.com/libraries/leaflet" target="_blank" rel="noopener">cdnjs</a>): map library</li>
-                    <li><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap tiles</a> and <a href="https://nominatim.org/" target="_blank" rel="noopener">Nominatim</a>: map tiles and address search</li>
-                    <li><a href="https://www.arcgis.com/home/item.html?id=de26a3cf4cc9451298ea173c4b324736" target="_blank" rel="noopener">Esri World Street Map</a> and <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9" target="_blank" rel="noopener">World Imagery</a>: map tiles</li>
-                    <li><a href="https://github.com/Raruto/leaflet-rotate" target="_blank" rel="noopener">leaflet-rotate</a> (via <a href="https://www.jsdelivr.com/package/npm/leaflet-rotate" target="_blank" rel="noopener">jsDelivr</a>): map rotation</li>
-                    <li><a href="https://photon.komoot.io/" target="_blank" rel="noopener">Photon (Komoot)</a>: address search</li>
-                    <li><a href="https://open-meteo.com/en/docs/geocoding-api" target="_blank" rel="noopener">Open-Meteo Geocoding API</a>: address search fallback</li>
-                    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API" target="_blank" rel="noopener">Geolocation API</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events" target="_blank" rel="noopener">Device Orientation events</a>: your position and compass, used only in your browser</li>
-                    <li><a href="https://developers.google.com/maps/documentation/urls/get-started" target="_blank" rel="noopener">Google Maps URLs</a>: the Directions links</li>
-                </ul>
-            </section>
+            <p class="note">
+                <strong>Sources:</strong> <span id="datasource"></span>
+                <a href="https://www.acma.gov.au/radiocomms-licence-data" target="_blank" rel="noopener">ACMA register</a> &middot;
+                <a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a> &middot;
+                <a href="https://github.com/Raruto/leaflet-rotate" target="_blank" rel="noopener">leaflet-rotate</a> &middot;
+                <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &middot;
+                <a href="https://nominatim.org/" target="_blank" rel="noopener">Nominatim</a> &middot;
+                <a href="https://www.arcgis.com/home/item.html?id=de26a3cf4cc9451298ea173c4b324736" target="_blank" rel="noopener">Esri</a> &middot;
+                <a href="https://photon.komoot.io/" target="_blank" rel="noopener">Photon</a> &middot;
+                <a href="https://open-meteo.com/en/docs/geocoding-api" target="_blank" rel="noopener">Open-Meteo</a> &middot;
+                <a href="https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API" target="_blank" rel="noopener">Geolocation API</a> &middot;
+                <a href="https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events" target="_blank" rel="noopener">Device Orientation</a> &middot;
+                <a href="https://developers.google.com/maps/documentation/urls/get-started" target="_blank" rel="noopener">Google Maps URLs</a>
+            </p>
         </main>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>

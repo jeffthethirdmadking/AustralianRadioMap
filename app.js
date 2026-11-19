@@ -48,7 +48,6 @@ const EMERGENCY_COLOR = "#b3261e";
 const CB_TX_CHANNEL_OFFSET = 30;
 const CB_TX_FREQUENCY_OFFSET_MHZ = 0.75;
 const EMERGENCY_CHANNEL = 5;
-const MAX_CHART_BARS = 15;
 const MAX_LABELLED_LINES = 25; // permanent labels on hundreds of lines are unreadable
 
 const SETTINGS_KEY = "auRadioMap.settings.v1";
@@ -1312,11 +1311,9 @@ function updateNearest() {
         requestStationRepaint();
         el("near").innerHTML = "";
         el("nearBox").hidden = true;
-        el("chartBox").hidden = true;
         return;
     }
     el("nearBox").hidden = false;
-    el("chartBox").hidden = false;
 
     const nearest = nearestStations();
 
@@ -1335,28 +1332,6 @@ function updateNearest() {
                 `<span class="km">${formatKm(km)}</span></button>`
         )
         .join("");
-    renderDistanceChart(nearest);
-}
-
-// Horizontal bar chart of distance to the nearest stations, coloured by radio type
-function renderDistanceChart(nearest) {
-    const bars = nearest.slice(0, MAX_CHART_BARS);
-    const longest = Math.max(...bars.map((entry) => entry.km), 1);
-    el("chartSummary").textContent = `Distance chart (${bars.length})`;
-    el("distChart").innerHTML =
-        bars
-            .map(({ km, station }) => {
-                const colour = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
-                const width = Math.max(2, (km / longest) * 100);
-                const label = escapeHtml(station[FIELD.siteName] || station[FIELD.callSign]);
-                return (
-                    `<div class="bar-row"><span class="bar-label"><b>${badgeText(station)}</b> ${label}</span>` +
-                    `<span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${colour}"></span></span>` +
-                    `<span class="bar-km">${formatKm(km)}</span></div>`
-                );
-            })
-            .join("") +
-        (nearest.length > bars.length ? `<p class="bar-note">Showing the nearest ${bars.length} of ${nearest.length}.</p>` : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1571,6 +1546,7 @@ function handleGpsError(error) {
 }
 
 // options.resume: carry on from the position already on screen (no "finding" message, no recentre)
+// options.keepAlternatives: leave the address matches as they are (Live greys them out instead)
 function startGps(options = {}) {
     if (!navigator.geolocation) {
         statusMessage = "Location is not available in this browser. Enter a suburb above instead.";
@@ -1584,8 +1560,10 @@ function startGps(options = {}) {
         firstFixPending = true;
         lastFix = null;
         statusMessage = "Finding your location…";
-        locationCandidates = [];
-        renderAlternatives();
+        if (!options.keepAlternatives) {
+            locationCandidates = [];
+            renderAlternatives();
+        }
         drawStations(false);
     }
 
@@ -1606,10 +1584,18 @@ function startGps(options = {}) {
 
 const positionIsFromGps = () => !!(settings.location && settings.location.label === "Your location");
 
-// Shows the Live button's state. While live is on, tracking is already running, so Find me hides.
+// Shows the Live button's state. While live is on, your position comes from the GPS, so the manual
+// ways of setting it (Find me, the address box, the Search button and the list of matches) are
+// greyed out and can't be used. Turning Live off switches them all back on.
 function updateLiveControls() {
-    el("live").setAttribute("aria-pressed", settings.liveGps);
-    el("me").hidden = settings.liveGps;
+    const live = settings.liveGps;
+    el("live").setAttribute("aria-pressed", live);
+    ["me", "aq", "search"].forEach((id) => {
+        el(id).disabled = live;
+        el(id).title = live ? "Switched off while Live is on" : "";
+    });
+    el("alts").inert = live;
+    el("alts").classList.toggle("is-disabled", live);
 }
 
 // The Live button: on starts following you straight away (it takes the place of Find me),
@@ -1623,7 +1609,7 @@ function handleLiveToggle() {
     saveSettings();
     updateLiveControls();
     if (settings.liveGps) {
-        startGps({ resume: !!userPosition && positionIsFromGps() });
+        startGps({ resume: !!userPosition && positionIsFromGps(), keepAlternatives: true });
     } else {
         stopGps();
         if (positionIsFromGps()) statusMessage = "Live updates off. Showing your last position.";
@@ -1633,6 +1619,7 @@ function handleLiveToggle() {
 
 async function handleAddressSearch(event) {
     event.preventDefault();
+    if (settings.liveGps) return; // switched off while Live is on
     const query = el("aq").value.trim();
     if (!query) return;
     stopGps();

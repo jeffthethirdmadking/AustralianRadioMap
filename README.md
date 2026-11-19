@@ -20,16 +20,29 @@ It is a static site: plain HTML, CSS and JavaScript with no build step and no se
  
 ```
 AustralianRadioMap/
-├── index.html          the page and all of its JavaScript
-├── style.css           all of the styling
-├── update_data.py      downloads the ACMA data and builds the data files
+├── index.html            the page
+├── app.js                all of the JavaScript
+├── style.css             all of the styling
+├── manifest.webmanifest  makes the page installable as an app
+├── sw.js                 service worker: caches the app so it opens fast and works offline
+├── icons/                app icon (SVG and PNG sizes) and favicon
+├── update_data.py        downloads the ACMA data and builds data/repeaters.json
 ├── data/
-│   └── repeaters.json  all stations, one full ACMA-style record each (written by update_data.py)
-├── cache/              downloaded ACMA zip (created by the script, not committed)
+│   └── repeaters.json    all stations, one full ACMA-style record each (written by update_data.py)
+├── cache/                downloaded ACMA zip (created by the script, not committed)
 ├── README.md
 ├── LICENSE
 └── .gitignore
 ```
+ 
+## Install as an app
+ 
+The page is a progressive web app. It must be served over https (GitHub Pages is) or from `localhost`.
+ 
+- **Android (Chrome):** open the page, then use the browser menu and choose *Install app* (or *Add to Home screen*).
+- **iPhone / iPad (Safari):** tap Share, then *Add to Home Screen*.
+- **Desktop (Chrome or Edge):** use the install icon at the right of the address bar.
+Once installed it opens full screen with its own icon. The page, scripts and station data are cached, so it starts quickly and the list of stations is available without a signal. Map tiles and address search still need a connection. When you publish new data, the installed app shows it the second time it is opened. To force an update of the cached app files, change `VERSION` at the top of `sw.js`.
  
 ## Running it
  

@@ -4,20 +4,17 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Australian radio stations: street map</title>
+        <meta name="description" content="Map of licensed UHF CB repeaters and other radio stations across Australia." />
+        <meta name="theme-color" content="#0d6a5a" />
+        <link rel="manifest" href="manifest.webmanifest" />
+        <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+        <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png" />
+        <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="AU Radio Map" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
-        <link rel="manifest" href="/manifest.webmanifest">
         <link rel="stylesheet" href="style.css" />
-        <link rel="icon" type="image/x-icon" href="/resources/icons/favicon-32.png">
-
-        <script>
-            if ('serviceWorker' in navigator) {
-                window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/service_worker.js')
-                    .then((reg) => console.log('Service worker registered', reg))
-                    .catch((err) => console.error('Service worker failed:', err));
-                });
-            }
-        </script>
     </head>
     <body>
         <main>

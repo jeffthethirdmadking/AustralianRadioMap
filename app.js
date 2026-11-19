@@ -1837,3 +1837,9 @@ async function init() {
 }
 
 init();
+
+// Installable app: the service worker (sw.js) caches the page and data so the app opens quickly
+// and keeps working with a weak signal. It needs http(s), so it is skipped for file:// pages.
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}

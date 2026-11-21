@@ -741,3 +741,48 @@ details.box {
 .note a {
     color: var(--accent);
 }
+
+/* ---- Popup for several stations at one position ---- */
+.leaflet-popup-content .spot-count {
+    margin: 0 0 6px;
+    color: #5a6a64;
+    font-size: 13px;
+}
+.leaflet-popup-content .spot-item {
+    border-top: 1px solid #dfe5e1;
+    padding: 6px 0;
+}
+.leaflet-popup-content .spot-item summary {
+    cursor: pointer;
+    font-weight: 400;
+}
+.leaflet-popup-content .spot-item dl {
+    margin: 6px 0 2px;
+}
+.leaflet-popup-content .type-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+}
+.leaflet-popup-content .spot-sub {
+    color: #5a6a64;
+    margin-left: 6px;
+}
+
+/* ---- Full screen map ---- */
+#map.is-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+}
+body.map-fullscreen-open {
+    overflow: hidden;
+}

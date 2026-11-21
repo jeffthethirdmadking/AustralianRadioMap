@@ -560,6 +560,92 @@ const RecenterControl = L.Control.extend({
 });
 new RecenterControl().addTo(map);
 
+// ---------------------------------------------------------------------------
+// Full screen. The map fills the screen. Where the browser has the Fullscreen API (Android, desktop,
+// iPad) that is used, which also hides the browser's own bars. Elsewhere (iPhone) the map is stretched
+// over the whole window with a fixed layout, so the button works everywhere. Esc or the button exits.
+// ---------------------------------------------------------------------------
+
+const FULLSCREEN_ICONS = {
+    enter:
+        '<svg viewBox="0 0 24 24" width="18" height="18" style="vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+    exit:
+        '<svg viewBox="0 0 24 24" width="18" height="18" style="vertical-align:middle" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>',
+};
+let mapIsFullscreen = false;
+let usingNativeFullscreen = false;
+let fullscreenLink = null;
+const nativeFullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+
+function updateFullscreenButton() {
+    if (!fullscreenLink) return;
+    const label = mapIsFullscreen ? "Exit full screen" : "Full screen";
+    fullscreenLink.innerHTML = mapIsFullscreen ? FULLSCREEN_ICONS.exit : FULLSCREEN_ICONS.enter;
+    fullscreenLink.title = label;
+    fullscreenLink.setAttribute("aria-label", label);
+    fullscreenLink.setAttribute("aria-pressed", mapIsFullscreen);
+}
+
+function setMapFullscreen(on) {
+    if (on === mapIsFullscreen) return;
+    mapIsFullscreen = on;
+    const container = map.getContainer();
+    container.classList.toggle("is-fullscreen", on); // the fixed full-window layout (see style.css)
+    document.body.classList.toggle("map-fullscreen-open", on); // stops the page scrolling behind the map
+    updateFullscreenButton();
+
+    if (on) {
+        const request = container.requestFullscreen || container.webkitRequestFullscreen;
+        if (request) {
+            // Must run inside the tap. If the browser refuses, the fixed layout still fills the window.
+            Promise.resolve(request.call(container))
+                .then(() => (usingNativeFullscreen = true))
+                .catch(() => {});
+        }
+    } else {
+        if (nativeFullscreenElement()) {
+            const exit = document.exitFullscreen || document.webkitExitFullscreen;
+            if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+        }
+        usingNativeFullscreen = false;
+    }
+    // Tell Leaflet the map's size changed. A second pass catches the end of the browser's own animation.
+    setTimeout(() => map.invalidateSize(), 60);
+    setTimeout(() => map.invalidateSize(), 400);
+}
+
+// Leaving the browser's full screen with Esc or a swipe: leave our layout too
+function handleNativeFullscreenChange() {
+    if (mapIsFullscreen && usingNativeFullscreen && !nativeFullscreenElement()) setMapFullscreen(false);
+    else setTimeout(() => map.invalidateSize(), 60);
+}
+document.addEventListener("fullscreenchange", handleNativeFullscreenChange);
+document.addEventListener("webkitfullscreenchange", handleNativeFullscreenChange);
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && mapIsFullscreen && !usingNativeFullscreen) setMapFullscreen(false);
+});
+
+const FullscreenControl = L.Control.extend({
+    options: { position: "topleft" },
+    onAdd() {
+        const bar = L.DomUtil.create("div", "leaflet-bar leaflet-control");
+        fullscreenLink = L.DomUtil.create("a", "", bar);
+        fullscreenLink.href = "#";
+        fullscreenLink.setAttribute("role", "button");
+        fullscreenLink.style.display = "flex";
+        fullscreenLink.style.alignItems = "center";
+        fullscreenLink.style.justifyContent = "center";
+        updateFullscreenButton();
+        L.DomEvent.disableClickPropagation(bar);
+        L.DomEvent.on(fullscreenLink, "click", (event) => {
+            L.DomEvent.preventDefault(event);
+            setMapFullscreen(!mapIsFullscreen);
+        });
+        return bar;
+    },
+});
+new FullscreenControl().addTo(map);
+
 let lastRoseAngle = null;
 let lastCompassLabel = "";
 function updateCompass() {
@@ -673,7 +759,8 @@ function filteredStations() {
     );
 }
 
-function popupHtml(s) {
+// The emergency note and the rows of details for one station
+function stationDetailsHtml(s, showDistance = true) {
     const row = (label, value) => (value === "" || value == null ? "" : `<dt>${label}</dt><dd>${value}</dd>`);
     const cb = isCb(s);
 
@@ -686,20 +773,63 @@ function popupHtml(s) {
           row("Emission", escapeHtml(s[FIELD.emission])) +
           row("Bandwidth", s[FIELD.bandwidthKhz] != null ? s[FIELD.bandwidthKhz] + " kHz" : "");
 
-    const distanceRow = userPosition
+    const distanceRow = userPosition && showDistance
         ? row("Distance from you", formatKm(distanceKm(userPosition, [s[FIELD.lat], s[FIELD.lon]])))
         : "";
     const polarisation = { V: "Vertical", H: "Horizontal" }[s[FIELD.polarisation]] || "";
 
-    return `<h2>${escapeHtml(s[FIELD.siteName] || "Site not recorded")}</h2>
-${isEmergency(s) ? '<p class="em">Emergency use only</p>' : ""}<dl>
+    return `${isEmergency(s) ? '<p class="em">Emergency use only</p>' : ""}<dl>
 ${row("State", s[FIELD.state])}${row("Postcode", escapeHtml(s[FIELD.postcode] || ""))}${distanceRow}
 ${row("Call sign", escapeHtml(s[FIELD.callSign]))}${row("Licensee", escapeHtml(s[FIELD.licensee] || ""))}${frequencyRows}
 ${row("Power", s[FIELD.powerWatts] ? s[FIELD.powerWatts] + " W" : "")}
 ${row("Antenna height", s[FIELD.antennaHeightM] != null ? s[FIELD.antennaHeightM] + " m" : "")}
 ${row("Polarisation", polarisation)}${row("Licence", escapeHtml(s[FIELD.licenceNumber] || ""))}
 ${row("Licence date", escapeHtml(s[FIELD.licenceDate] || ""))}${row("Antenna", escapeHtml(s[FIELD.antennaType] || ""))}
-</dl><p><a href="https://www.google.com/maps/dir/?api=1&destination=${s[FIELD.lat]},${s[FIELD.lon]}" target="_blank" rel="noopener">Directions</a></p>`;
+</dl>`;
+}
+
+const directionsLink = (lat, lon) =>
+    `<p><a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}" target="_blank" rel="noopener">Directions</a></p>`;
+
+function popupHtml(s) {
+    return `<h2>${escapeHtml(s[FIELD.siteName] || "Site not recorded")}</h2>${stationDetailsHtml(s)}${directionsLink(s[FIELD.lat], s[FIELD.lon])}`;
+}
+
+const stationColour = (s) => (isEmergency(s) ? EMERGENCY_COLOR : TYPE_COLOR[s[FIELD.radioType]]);
+
+// Several stations at one position share one popup. Each gets its own collapsible section, headed by a
+// dot in its type's colour (the same colours as the map and legend) and the type's name.
+// "focus" is the station to leave open (the first one when not given).
+function spotPopupHtml(spot, focus) {
+    if (spot.stations.length === 1) return popupHtml(spot.stations[0]);
+    const siteName = spot.stations.map((s) => s[FIELD.siteName]).find(Boolean) || "Site not recorded";
+    const away = userPosition ? ` &middot; ${formatKm(distanceKm(userPosition, [spot.lat, spot.lon]))} away` : "";
+    const items = spot.stations
+        .map((s, index) => {
+            const open = focus ? s === focus : index === 0;
+            const detail = [isCb(s) ? `ch ${s[FIELD.channel]}` : `${fmtMhz(s[FIELD.outputMhz])} MHz`, s[FIELD.callSign]]
+                .filter(Boolean)
+                .map(escapeHtml)
+                .join(" &middot; ");
+            return (
+                `<details class="spot-item"${open ? " open" : ""}><summary>` +
+                `<span class="type-dot" style="background:${stationColour(s)}"></span><b>${escapeHtml(TYPE_LABEL[s[FIELD.radioType]] || "Station")}</b>` +
+                `<span class="spot-sub">${detail}</span></summary>${stationDetailsHtml(s, false)}</details>`
+            );
+        })
+        .join("");
+    return (
+        `<h2>${escapeHtml(siteName)}</h2><p class="spot-count">${spot.stations.length} stations at this site${away}</p>` +
+        items +
+        directionsLink(spot.lat, spot.lon)
+    );
+}
+
+function openSpotPopup(spot, focus) {
+    L.popup({ maxWidth: 320, maxHeight: spot.stations.length > 1 ? 340 : null })
+        .setLatLng([spot.lat, spot.lon])
+        .setContent(spotPopupHtml(spot, focus))
+        .openOn(map);
 }
 
 // ---------------------------------------------------------------------------
@@ -723,10 +853,13 @@ const DOT_RING_WIDTH = 1.5;
 const SPRITE_PADDING = 6; // room around a dot for its halo
 const USER_DOT_RADIUS = 9;
 const USER_COLOUR = "#1a73e8";
+const SPOT_DOT_RADIUS = 10; // marker for several stations at one position
 
 let visibleStations = []; // stations passing the current filters
-let visibleWorld = new Float64Array(0); // x, y of each visible station in unit Web Mercator (0 to 1)
-let visibleGroups = []; // [{ colour, radius, emergency, indices }]: one group per dot style
+let visibleSpots = []; // [{ key, lat, lon, stations }]: stations at the same position share one marker
+let spotByKey = new Map();
+let visibleWorld = new Float64Array(0); // x, y of each visible spot in unit Web Mercator (0 to 1)
+let visibleGroups = []; // [{ colours, count, radius, emergency, indices }]: one group per marker style
 let repaintQueued = false;
 let lastPaintedView = null;
 
@@ -835,24 +968,97 @@ function userSprite(ratio) {
     });
 }
 
-// Work out each visible station's position and dot style once per filter change, not per frame
+// A marker for several stations at one position: a pie of their type colours (the colours in
+// the legend) around a white centre showing how many there are
+function spotSprite(group, ratio) {
+    const { colours, count, radius, emergency } = group;
+    return makeSprite(`spot|${colours.join(",")}|${count}|${emergency}|${radius}|${ratio}`, radius, ratio, (c, centre) => {
+        if (emergency) {
+            c.beginPath();
+            c.arc(centre, centre, radius + 4.5, 0, TAU);
+            c.fillStyle = "rgba(179,38,30,0.2)";
+            c.fill();
+        }
+        c.beginPath(); // white ring
+        c.arc(centre, centre, radius + DOT_RING_WIDTH, 0, TAU);
+        c.fillStyle = "#fff";
+        c.fill();
+        const slice = TAU / colours.length;
+        colours.forEach((colour, index) => {
+            c.beginPath();
+            c.moveTo(centre, centre);
+            c.arc(centre, centre, radius, -Math.PI / 2 + index * slice, -Math.PI / 2 + (index + 1) * slice);
+            c.closePath();
+            c.fillStyle = colour;
+            c.fill();
+        });
+        if (colours.length > 1) {
+            c.strokeStyle = "#fff"; // thin white lines between the colours
+            c.lineWidth = 1.5;
+            colours.forEach((colour, index) => {
+                const angle = -Math.PI / 2 + index * slice;
+                c.beginPath();
+                c.moveTo(centre, centre);
+                c.lineTo(centre + radius * Math.cos(angle), centre + radius * Math.sin(angle));
+                c.stroke();
+            });
+        }
+        c.beginPath(); // white centre with the count
+        c.arc(centre, centre, radius * 0.6, 0, TAU);
+        c.fillStyle = "#fff";
+        c.fill();
+        c.fillStyle = "#17231f";
+        c.font = `800 ${Math.round(radius * 0.95)}px system-ui, sans-serif`;
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText(count > 9 ? "9+" : String(count), centre, centre + 0.5);
+    });
+}
+
+// Work out each marker's position and style once per filter change, not per frame. Stations at the
+// same position (to about a metre) are merged into one marker.
+const spotKeyFor = (station) => station[FIELD.lat].toFixed(5) + "," + station[FIELD.lon].toFixed(5);
+
 function buildVisibleIndex() {
-    visibleWorld = new Float64Array(visibleStations.length * 2);
+    spotByKey = new Map();
+    visibleSpots = [];
+    visibleStations.forEach((station) => {
+        const key = spotKeyFor(station);
+        let spot = spotByKey.get(key);
+        if (!spot) {
+            spot = { key, lat: station[FIELD.lat], lon: station[FIELD.lon], stations: [] };
+            spotByKey.set(key, spot);
+            visibleSpots.push(spot);
+        }
+        spot.stations.push(station);
+    });
+
+    const typeOrder = (station) => RADIO_TYPES.findIndex((t) => t.id === station[FIELD.radioType]);
+    visibleWorld = new Float64Array(visibleSpots.length * 2);
     const byStyle = new Map();
-    visibleStations.forEach((station, index) => {
-        const [u, v] = unitMercator(station[FIELD.lat], station[FIELD.lon]);
+    visibleSpots.forEach((spot, index) => {
+        spot.stations.sort((a, b) => typeOrder(a) - typeOrder(b) || (a[FIELD.channel] || 0) - (b[FIELD.channel] || 0));
+        const [u, v] = unitMercator(spot.lat, spot.lon);
         visibleWorld[index * 2] = u;
         visibleWorld[index * 2 + 1] = v;
-        const emergency = isEmergency(station);
-        const colour = emergency ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
-        const key = colour + "|" + emergency;
+
+        const colours = [];
+        spot.stations.forEach((station) => {
+            const colour = stationColour(station);
+            if (!colours.includes(colour)) colours.push(colour);
+        });
+        const count = spot.stations.length;
+        const emergency = spot.stations.some(isEmergency);
+        const key = colours.join(",") + "#" + count + "#" + emergency;
         if (!byStyle.has(key)) {
-            byStyle.set(key, { colour, emergency, radius: emergency ? EMERGENCY_DOT_RADIUS : DOT_RADIUS, indices: [] });
+            const radius = count > 1 ? SPOT_DOT_RADIUS : emergency ? EMERGENCY_DOT_RADIUS : DOT_RADIUS;
+            byStyle.set(key, { colours, count, emergency, radius, indices: [] });
         }
         byStyle.get(key).indices.push(index);
     });
-    // Emergency dots last, so they sit on top
-    visibleGroups = [...byStyle.values()].sort((a, b) => a.emergency - b.emergency);
+    // Merged markers and emergency markers last, so they sit on top
+    const weight = (group) => (group.count > 1 ? 1 : 0) + (group.emergency ? 2 : 0);
+    visibleGroups = [...byStyle.values()].sort((a, b) => weight(a) - weight(b));
 }
 
 // Positions for the nearest-station lines and your own dot, cached until they change
@@ -869,6 +1075,31 @@ function nearestUnits() {
         });
     }
     return nearestWorld;
+}
+// The nearest stations grouped by position: stations at the same spot are one node, with one line and
+// one bubble. Cached until the list changes. Each group: { km, index (of its first entry), stations }.
+let cachedGroupsFor = null;
+let nearestGroupList = [];
+function nearestGroups() {
+    if (cachedGroupsFor !== nearestShown) {
+        cachedGroupsFor = nearestShown;
+        nearestGroupList = [];
+        const byKey = new Map();
+        nearestShown.forEach(({ km, station }, index) => {
+            const key = spotKeyFor(station);
+            if (!byKey.has(key)) {
+                const group = { km, index, stations: [] };
+                byKey.set(key, group);
+                nearestGroupList.push(group);
+            }
+            byKey.get(key).stations.push(station);
+        });
+        const typeOrder = (station) => RADIO_TYPES.findIndex((t) => t.id === station[FIELD.radioType]);
+        nearestGroupList.forEach((group) =>
+            group.stations.sort((a, b) => typeOrder(a) - typeOrder(b) || (a[FIELD.channel] || 0) - (b[FIELD.channel] || 0))
+        );
+    }
+    return nearestGroupList;
 }
 let cachedUserPosition = null;
 let cachedUserUnit = null;
@@ -930,25 +1161,6 @@ function openPopupHoles() {
     return holes;
 }
 
-const LABEL_FONT = "600 12px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-const LABEL_LINE_HEIGHT = 15;
-const labelWidths = new Map(); // measuring text is slow, so remember each line's width
-
-// Text lines for a station's label: distance, then RX / TX, as chosen in the line options
-function labelLines(km, station) {
-    const lines = [];
-    if (settings.showDistanceLabels) lines.push(formatKm(km));
-    if (settings.showChannelLabels) {
-        if (isCb(station)) {
-            lines.push(`RX ${station[FIELD.channel]} \u00b7 ${fmtMhz(station[FIELD.outputMhz])}`);
-            lines.push(`TX ${cbTxChannel(station)} \u00b7 ${fmtMhz(cbTxMhz(station))}`);
-        } else {
-            lines.push(`RX ${fmtMhz(station[FIELD.outputMhz])} MHz`);
-        }
-    }
-    return lines;
-}
-
 function roundedRectPath(ctx, x, y, width, height, radius) {
     ctx.moveTo(x + radius, y);
     ctx.arcTo(x + width, y, x + width, y + height, radius);
@@ -958,41 +1170,279 @@ function roundedRectPath(ctx, x, y, width, height, radius) {
     ctx.closePath();
 }
 
-// A small white label with a shadow. "centre" puts it on (x, y); "above" sits it with its
-// bottom edge at y.
-function drawLabel(ctx, lines, x, y, placement) {
-    ctx.font = LABEL_FONT;
-    const textWidth = Math.max(
-        ...lines.map((text) => {
-            if (!labelWidths.has(text)) labelWidths.set(text, ctx.measureText(text).width);
-            return labelWidths.get(text);
-        })
-    );
-    const width = textWidth + 14;
-    const height = lines.length * LABEL_LINE_HEIGHT + 6;
-    const left = x - width / 2;
-    const top = placement === "above" ? y - height : y - height / 2;
+// ---------------------------------------------------------------------------
+// Bubbles on the lines. Every node gets its own bubble, sitting on its line. A node with a single
+// station shows that station: a marker in its type colour, the type's name, the distance and RX / TX.
+// A node with several stations shows a header (distance and count) and a row for each. When bubbles
+// would overlap, the ones that overlap are joined into a single bubble that lists all their nodes.
+// ---------------------------------------------------------------------------
+
+const BUBBLE_FONT = "600 12px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const BUBBLE_SMALL_FONT = "400 11px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const BUBBLE_PADDING = 9;
+const BUBBLE_MARKER_COLUMN = 20; // space for the coloured marker at the start of each row
+const BUBBLE_ROW_GAP = 6;
+const BUBBLE_SECTION_GAP = 12; // between the nodes of a joined bubble
+const BUBBLE_TITLE_HEIGHT = 15;
+const BUBBLE_DETAIL_HEIGHT = 13;
+const MAX_BUBBLE_ROWS = 4; // stations shown in a bubble for one node
+const MAX_JOINED_ROWS = 8; // stations shown in a joined bubble; the rest are in the markers' popups
+const LABEL_GAP = 4; // bubbles closer than this count as overlapping
+const JOINED_ACCENT = "#17231f";
+const NARROW_MAP_WIDTH = 520; // below this, RX and TX go on separate lines so bubbles are narrower
+
+const textWidths = new Map(); // measuring text is slow, so remember each width
+function textWidth(ctx, font, text) {
+    const key = font + "|" + text;
+    if (!textWidths.has(key)) {
+        ctx.font = font;
+        textWidths.set(key, ctx.measureText(text).width);
+    }
+    return textWidths.get(key);
+}
+
+const spotRadius = (spot) => (spot.stations.length > 1 ? SPOT_DOT_RADIUS : isEmergency(spot.stations[0]) ? EMERGENCY_DOT_RADIUS : DOT_RADIUS);
+
+// What a bubble says. spots = the node or nodes it covers, nearest first; spot = { km, stations }.
+// One section per node, one row per station.
+function bubbleContentFor(spots) {
+    const joined = spots.length > 1;
+    let budget = joined ? MAX_JOINED_ROWS : MAX_BUBBLE_ROWS;
+    let hidden = 0;
+    const sections = [];
+    spots.forEach((spot) => {
+        const multi = spot.stations.length > 1;
+        const distance = settings.showDistanceLabels ? formatKm(spot.km) : "";
+        const shown = spot.stations.slice(0, Math.max(0, budget));
+        budget -= shown.length;
+        hidden += spot.stations.length - shown.length;
+        if (!shown.length) return;
+        sections.push({
+            header: multi ? [distance, `${spot.stations.length} stations`].filter(Boolean).join(" \u00b7 ") : "",
+            rows: shown.map((station) => {
+                const type = TYPE_LABEL[station[FIELD.radioType]] || "Station";
+                let details = [];
+                if (settings.showChannelLabels) {
+                    if (isCb(station)) {
+                        const rx = `RX ${station[FIELD.channel]} \u00b7 ${fmtMhz(station[FIELD.outputMhz])}`;
+                        const tx = `TX ${cbTxChannel(station)} \u00b7 ${fmtMhz(cbTxMhz(station))}`;
+                        details = map.getSize().x < NARROW_MAP_WIDTH ? [rx, tx] : [`${rx}   ${tx}`];
+                    } else {
+                        details = [`RX ${fmtMhz(station[FIELD.outputMhz])} MHz`];
+                    }
+                }
+                return {
+                    colour: stationColour(station),
+                    emergency: isEmergency(station),
+                    title: isCb(station) ? `${type} ch ${station[FIELD.channel]}` : type,
+                    distance: multi ? "" : distance, // a node with several stations shows its distance once, in its header
+                    details,
+                };
+            }),
+        });
+    });
+    return {
+        sections,
+        // A bubble for one node is outlined in its line's colour so it can be matched to the line
+        accent: joined ? JOINED_ACCENT : stationColour(spots[0].stations[0]),
+        hiddenText: hidden ? `+${hidden} more (tap the markers)` : "",
+    };
+}
+
+function bubbleSize(ctx, content) {
+    let widest = 0;
+    let height = BUBBLE_PADDING * 2;
+    content.sections.forEach((section, sectionIndex) => {
+        if (sectionIndex > 0) height += BUBBLE_SECTION_GAP;
+        if (section.header) {
+            widest = Math.max(widest, textWidth(ctx, BUBBLE_FONT, section.header) - BUBBLE_MARKER_COLUMN);
+            height += BUBBLE_TITLE_HEIGHT + 4;
+        }
+        section.rows.forEach((row, rowIndex) => {
+            const top = textWidth(ctx, BUBBLE_FONT, row.title) + (row.distance ? 12 + textWidth(ctx, BUBBLE_FONT, row.distance) : 0);
+            const detail = Math.max(0, ...row.details.map((line) => textWidth(ctx, BUBBLE_SMALL_FONT, line)));
+            widest = Math.max(widest, top, detail);
+            height += BUBBLE_TITLE_HEIGHT + row.details.length * BUBBLE_DETAIL_HEIGHT;
+            if (rowIndex < section.rows.length - 1) height += BUBBLE_ROW_GAP;
+        });
+    });
+    if (content.hiddenText) {
+        widest = Math.max(widest, textWidth(ctx, BUBBLE_SMALL_FONT, content.hiddenText));
+        height += BUBBLE_DETAIL_HEIGHT + 4;
+    }
+    return { width: BUBBLE_PADDING * 2 + BUBBLE_MARKER_COLUMN + widest, height };
+}
+
+function drawBubble(ctx, content, box) {
+    const left = box.x - box.width / 2;
+    const top = box.y - box.height / 2;
+    const textLeft = left + BUBBLE_PADDING + BUBBLE_MARKER_COLUMN;
 
     ctx.save();
     ctx.shadowColor = "rgba(0,0,0,0.28)";
-    ctx.shadowBlur = 6;
+    ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 2;
     ctx.beginPath();
-    roundedRectPath(ctx, left, top, width, height, 7);
-    ctx.fillStyle = "rgba(255,255,255,0.96)";
+    roundedRectPath(ctx, left, top, box.width, box.height, 9);
+    ctx.fillStyle = "rgba(255,255,255,0.97)";
     ctx.fill();
     ctx.restore();
-
     ctx.beginPath();
-    roundedRectPath(ctx, left, top, width, height, 7);
-    ctx.strokeStyle = "rgba(0,0,0,0.14)";
-    ctx.lineWidth = 1;
+    roundedRectPath(ctx, left, top, box.width, box.height, 9);
+    ctx.strokeStyle = content.accent;
+    ctx.lineWidth = 2;
     ctx.stroke();
 
-    ctx.fillStyle = "#1d1d1d";
-    ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    lines.forEach((text, index) => ctx.fillText(text, x, top + 3 + LABEL_LINE_HEIGHT * (index + 0.5)));
+    let y = top + BUBBLE_PADDING;
+    content.sections.forEach((section, sectionIndex) => {
+        if (sectionIndex > 0) {
+            ctx.beginPath(); // thin line between the nodes of a joined bubble
+            ctx.moveTo(left + BUBBLE_PADDING, y + BUBBLE_SECTION_GAP / 2);
+            ctx.lineTo(left + box.width - BUBBLE_PADDING, y + BUBBLE_SECTION_GAP / 2);
+            ctx.strokeStyle = "rgba(0,0,0,0.15)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            y += BUBBLE_SECTION_GAP;
+        }
+        if (section.header) {
+            ctx.fillStyle = "#17231f";
+            ctx.font = BUBBLE_FONT;
+            ctx.textAlign = "left";
+            ctx.fillText(section.header, left + BUBBLE_PADDING, y + BUBBLE_TITLE_HEIGHT / 2);
+            y += BUBBLE_TITLE_HEIGHT + 4;
+        }
+        section.rows.forEach((row, rowIndex) => {
+            const middle = y + BUBBLE_TITLE_HEIGHT / 2;
+            const markerX = left + BUBBLE_PADDING + 6;
+            ctx.beginPath(); // marker: white ring, then the type colour
+            ctx.arc(markerX, middle, 7, 0, TAU);
+            ctx.fillStyle = "#fff";
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(markerX, middle, 5.5, 0, TAU);
+            ctx.fillStyle = row.colour;
+            ctx.fill();
+            if (row.emergency) {
+                ctx.fillStyle = "#fff";
+                ctx.font = "800 8px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText("!", markerX, middle + 0.5);
+            }
+            ctx.fillStyle = "#17231f";
+            ctx.font = BUBBLE_FONT;
+            ctx.textAlign = "left";
+            ctx.fillText(row.title, textLeft, middle);
+            if (row.distance) {
+                ctx.textAlign = "right";
+                ctx.fillText(row.distance, left + box.width - BUBBLE_PADDING, middle);
+            }
+            y += BUBBLE_TITLE_HEIGHT;
+            row.details.forEach((line) => {
+                ctx.fillStyle = "#5a6a64";
+                ctx.font = BUBBLE_SMALL_FONT;
+                ctx.textAlign = "left";
+                ctx.fillText(line, textLeft, y + BUBBLE_DETAIL_HEIGHT / 2);
+                y += BUBBLE_DETAIL_HEIGHT;
+            });
+            if (rowIndex < section.rows.length - 1) y += BUBBLE_ROW_GAP;
+        });
+    });
+    if (content.hiddenText) {
+        ctx.fillStyle = "#5a6a64";
+        ctx.font = BUBBLE_SMALL_FONT;
+        ctx.textAlign = "left";
+        ctx.fillText(content.hiddenText, textLeft, y + 4 + BUBBLE_DETAIL_HEIGHT / 2);
+    }
+}
+
+// Boxes are { x, y, width, height } with (x, y) at the centre. How much do two overlap, counting
+// anything closer than LABEL_GAP as overlapping? 0 means they are clear of each other.
+function overlapArea(a, b) {
+    const across = Math.min(a.x + a.width / 2, b.x + b.width / 2) - Math.max(a.x - a.width / 2, b.x - b.width / 2) + LABEL_GAP;
+    const down = Math.min(a.y + a.height / 2, b.y + b.height / 2) - Math.max(a.y - a.height / 2, b.y - b.height / 2) + LABEL_GAP;
+    return across > 0 && down > 0 ? across * down : 0;
+}
+
+// Positions to try for a bubble, best first. With lines: along the node's line (the middle first), then
+// pushed to either side of it. Without lines: above the marker, then below, then to each side.
+function labelCandidates(from, to, dotRadius, size) {
+    const spots = [];
+    if (settings.showLines && from) {
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const length = Math.hypot(dx, dy) || 1;
+        const nx = -dy / length;
+        const ny = dx / length;
+        // How far to push sideways so the bubble's edge clears the line, whatever angle the line is at
+        const sideways = Math.abs(nx) * (size.width / 2) + Math.abs(ny) * (size.height / 2) + 6;
+        [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88].forEach((t) =>
+            [0, 1, -1, 2, -2].forEach((side) =>
+                spots.push({ x: from.x + dx * t + nx * sideways * side, y: from.y + dy * t + ny * sideways * side })
+            )
+        );
+    } else {
+        const up = dotRadius + 6 + size.height / 2;
+        const across = size.width / 2 + dotRadius + 6;
+        [0, 1, 2].forEach((ring) => {
+            const lift = up + ring * (size.height + 4);
+            const side = across + ring * 8;
+            [[0, -lift], [0, lift], [side, 0], [-side, 0], [side, -lift], [-side, -lift], [side, lift], [-side, lift]].forEach(([ox, oy]) =>
+                spots.push({ x: to.x + ox, y: to.y + oy })
+            );
+        });
+    }
+    return spots;
+}
+
+// Nodes whose markers sit on top of each other on screen (touching, or closer than this many pixels
+// apart) are in the same position as far as the eye can tell, so they share one bubble.
+const MARKER_TOUCH_GAP = 4;
+
+// Works out the bubbles to draw. Every node gets its own bubble, except nodes whose markers overlap each
+// other on screen: those share one bubble listing all of them. Bubbles of nodes that are in different
+// positions are never joined. Each bubble goes on the first position along its line (or along any of
+// its nodes' lines) that is clear of the other bubbles, your dot and the markers; when there is none it
+// goes where it overlaps least. Nearest first, so the nearest nodes get the best spots.
+// Returns [{ spots, content, box }].
+function layoutBubbles(ctx, nearestSpots, from, canvasSize) {
+    const fixed = [{ x: from.x, y: from.y, width: 2 * (USER_DOT_RADIUS + 8), height: 2 * (USER_DOT_RADIUS + 8) }];
+    nearestSpots.forEach((spot) => {
+        const side = 2 * (spotRadius(spot) + 3);
+        fixed.push({ x: spot.point.x, y: spot.point.y, width: side, height: side });
+    });
+
+    // Group the nodes whose markers touch (a chain of touching markers is one group)
+    const touching = (a, b) => Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y) < spotRadius(a) + spotRadius(b) + MARKER_TOUCH_GAP;
+    let groups = [];
+    nearestSpots.forEach((spot) => {
+        const touched = groups.filter((group) => group.some((other) => touching(other, spot)));
+        groups = groups.filter((group) => !touched.includes(group));
+        groups.push([spot, ...touched.flat()].sort((a, b) => a.km - b.km));
+    });
+    groups.sort((a, b) => a[0].km - b[0].km);
+
+    const placed = [];
+    groups.forEach((members) => {
+        const content = bubbleContentFor(members);
+        const size = bubbleSize(ctx, content);
+        let best = null;
+        for (const member of members) {
+            for (const spotPosition of labelCandidates(from, member.point, spotRadius(member), size)) {
+                const box = { x: spotPosition.x, y: spotPosition.y, width: size.width, height: size.height };
+                const offX = Math.max(0, size.width / 2 - box.x, box.x + size.width / 2 - canvasSize.x);
+                const offY = Math.max(0, size.height / 2 - box.y, box.y + size.height / 2 - canvasSize.y);
+                let cost = (offX + offY) * 1000;
+                fixed.forEach((other) => (cost += overlapArea(box, other)));
+                placed.forEach((other) => (cost += overlapArea(box, other.box)));
+                if (!best || cost < best.cost) best = { ...box, cost };
+                if (cost === 0) break;
+            }
+            if (best.cost === 0) break;
+        }
+        placed.push({ spots: members, content, box: best });
+    });
+    return placed;
 }
 
 // A line of round dots with a pale halo, so it reads on streets and satellite imagery alike
@@ -1061,14 +1511,14 @@ function paintOverlays(ctx, size, ratio) {
     const userUnit = userUnits();
     const userPoint = userUnit ? toScreen(view, userUnit[0], userUnit[1], { x: 0, y: 0 }) : null;
     const nearestUnit = userPoint ? nearestUnits() : null;
-    const nearestPoints = userPoint
-        ? nearestShown.map(({ km, station }, index) => ({
-              km,
-              station,
-              point: toScreen(view, nearestUnit[index * 2], nearestUnit[index * 2 + 1], { x: 0, y: 0 }),
+    const nearestSpots = userPoint
+        ? nearestGroups().map((group) => ({
+              km: group.km,
+              stations: group.stations,
+              point: toScreen(view, nearestUnit[group.index * 2], nearestUnit[group.index * 2 + 1], { x: 0, y: 0 }),
           }))
         : [];
-    const labelled = nearestPoints.length <= MAX_LABELLED_LINES; // labels on hundreds of lines are unreadable
+    const labelled = nearestSpots.length <= MAX_LABELLED_LINES; // bubbles on hundreds of lines are unreadable
 
     if (userPoint && userAccuracy) {
         ctx.beginPath();
@@ -1082,14 +1532,14 @@ function paintOverlays(ctx, size, ratio) {
 
     if (userPoint && settings.showLines) {
         if (labelled) {
-            nearestPoints.forEach(({ station, point: end }) =>
-                strokeDottedLine(ctx, userPoint.x, userPoint.y, end.x, end.y, isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]])
+            nearestSpots.forEach(({ stations, point: end }) =>
+                strokeDottedLine(ctx, userPoint.x, userPoint.y, end.x, end.y, stationColour(stations[0]))
             );
         } else {
             // Hundreds of lines: thin solid lines, one stroke per colour
             const byColour = new Map();
-            nearestPoints.forEach(({ station, point: end }) => {
-                const colour = isEmergency(station) ? EMERGENCY_COLOR : TYPE_COLOR[station[FIELD.radioType]];
+            nearestSpots.forEach(({ stations, point: end }) => {
+                const colour = stationColour(stations[0]);
                 if (!byColour.has(colour)) byColour.set(colour, []);
                 byColour.get(colour).push(end);
             });
@@ -1110,7 +1560,7 @@ function paintOverlays(ctx, size, ratio) {
 
     // Station dots
     for (const group of visibleGroups) {
-        const sprite = dotSprite(group.colour, group.radius, group.emergency, ratio);
+        const sprite = group.count > 1 ? spotSprite(group, ratio) : dotSprite(group.colours[0], group.radius, group.emergency, ratio);
         const half = sprite.size / 2;
         const margin = half + 2;
         const indices = group.indices;
@@ -1130,6 +1580,11 @@ function paintOverlays(ctx, size, ratio) {
     }
 
     if (!userPoint) return;
+
+    // The bubbles, drawn under your dot so your position stays visible
+    if (labelled && (settings.showDistanceLabels || settings.showChannelLabels)) {
+        layoutBubbles(ctx, nearestSpots, userPoint, size).forEach((bubble) => drawBubble(ctx, bubble.content, bubble.box));
+    }
 
     // Heading arrow while following the phone's compass. True north sits at +bearing on screen (the
     // compass rose turns by the same amount), so the way you face is heading + bearing. Following
@@ -1155,17 +1610,6 @@ function paintOverlays(ctx, size, ratio) {
     // Your dot
     const user = userSprite(ratio);
     ctx.drawImage(user.canvas, userPoint.x - user.size / 2, userPoint.y - user.size / 2, user.size, user.size);
-
-    // Labels last, so they sit on top. On the line when lines are drawn, otherwise above each marker.
-    if (!labelled) return;
-    nearestPoints.forEach(({ km, station, point: end }) => {
-        const lines = labelLines(km, station);
-        if (!lines.length) return;
-        const x = settings.showLines ? (userPoint.x + end.x) / 2 : end.x;
-        const y = settings.showLines ? (userPoint.y + end.y) / 2 : end.y - (isEmergency(station) ? EMERGENCY_DOT_RADIUS : DOT_RADIUS) - 10;
-        if (x < -80 || y < -80 || x > size.x + 80 || y > size.y + 80) return;
-        drawLabel(ctx, lines, x, y, settings.showLines ? "centre" : "above");
-    });
 }
 
 // Animated zooms (buttons, double tap, the snap at the end of a pinch): slide the canvas along
@@ -1203,7 +1647,7 @@ map.on("click", (event) => {
     const point = { x: 0, y: 0 };
     let bestIndex = -1;
     let bestDistance = reach * reach;
-    for (let index = 0; index < visibleStations.length; index++) {
+    for (let index = 0; index < visibleSpots.length; index++) {
         toScreen(view, visibleWorld[index * 2], visibleWorld[index * 2 + 1], point);
         const distance = (point.x - tap.x) ** 2 + (point.y - tap.y) ** 2;
         if (distance < bestDistance) {
@@ -1211,13 +1655,7 @@ map.on("click", (event) => {
             bestIndex = index;
         }
     }
-    if (bestIndex >= 0) {
-        const station = visibleStations[bestIndex];
-        L.popup()
-            .setLatLng([station[FIELD.lat], station[FIELD.lon]])
-            .setContent(popupHtml(station))
-            .openOn(map);
-    }
+    if (bestIndex >= 0) openSpotPopup(visibleSpots[bestIndex]);
 });
 
 function drawStations(fitToResults) {
@@ -1657,7 +2095,8 @@ function wireEvents() {
         saveSettings();
         buildTypeButtons();
         buildStateButtons();
-        drawStations(true);
+        map.closePopup(); // the selected marker may no longer be shown
+        drawStations(false); // leave the map where it is
         updateNearest();
     };
 
@@ -1667,6 +2106,7 @@ function wireEvents() {
         settings.state = button.dataset.state;
         saveSettings();
         buildStateButtons();
+        map.closePopup();
         drawStations(true);
         updateNearest();
     };
@@ -1719,7 +2159,8 @@ function wireEvents() {
         if (!button) return;
         const station = stations[+button.dataset.index];
         map.setView([station[FIELD.lat], station[FIELD.lon]], Math.max(map.getZoom(), 11));
-        L.popup().setLatLng([station[FIELD.lat], station[FIELD.lon]]).setContent(popupHtml(station)).openOn(map);
+        const spot = spotByKey.get(spotKeyFor(station)) || { lat: station[FIELD.lat], lon: station[FIELD.lon], stations: [station] };
+        openSpotPopup(spot, station);
     };
 
     el("compassBtn").onclick = toggleCompassMode;

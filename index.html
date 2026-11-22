@@ -7,9 +7,9 @@
         <meta name="description" content="Map of licensed UHF CB repeaters and other radio stations across Australia." />
         <meta name="theme-color" content="#0d6a5a" />
         <link rel="manifest" href="manifest.webmanifest" />
-        <link rel="icon" href="resources/icons/icon.svg" type="image/svg+xml" />
-        <link rel="icon" href="resources/icons/favicon-32.png" sizes="32x32" type="image/png" />
-        <link rel="apple-touch-icon" href="resources/icons/apple-touch-icon.png" />
+        <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+        <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png" />
+        <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="AU Radio Map" />
@@ -93,9 +93,27 @@
                 <a href="https://open-meteo.com/en/docs/geocoding-api" target="_blank" rel="noopener">Open-Meteo</a> &middot;
                 <a href="https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API" target="_blank" rel="noopener">Geolocation API</a> &middot;
                 <a href="https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events" target="_blank" rel="noopener">Device Orientation</a> &middot;
-                <a href="https://developers.google.com/maps/documentation/urls/get-started" target="_blank" rel="noopener">Google Maps URLs</a>
+                <a href="https://developers.google.com/maps/documentation/urls/get-started" target="_blank" rel="noopener">Google Maps URLs</a> &middot;
+                <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">AWS Terrain Tiles</a>
             </p>
         </main>
+        <dialog id="losDialog" class="los" aria-labelledby="losTitle" tabindex="-1">
+            <div class="los-head">
+                <h2 id="losTitle">Line of sight</h2>
+                <button type="button" id="losClose" aria-label="Close">&times;</button>
+            </div>
+            <div class="los-controls">
+                <label>Your antenna (m) <input id="losYourHeight" type="number" min="0" max="100" step="0.5" value="2" /></label>
+                <label>Station antenna (m) <input id="losStationHeight" type="number" min="0" max="500" step="1" value="10" /></label>
+                <label class="los-check"><input id="losCurve" type="checkbox" checked /> Earth curvature</label>
+            </div>
+            <p id="losVerdict" aria-live="polite"></p>
+            <div id="losChart"></div>
+            <p class="los-note">
+                Ground heights from AWS terrain tiles (roughly 30 to 90 m resolution). Buildings and trees are not
+                included, and the antenna height is licence data or a default, so treat this as a guide.
+            </p>
+        </dialog>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
         <script src="app.js"></script>

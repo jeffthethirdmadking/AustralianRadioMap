@@ -786,3 +786,102 @@ details.box {
 body.map-fullscreen-open {
     overflow: hidden;
 }
+
+/* ---- Line of sight ---- */
+.link-btn {
+    padding: 5px 10px;
+    border: 1.5px solid #1a73e8;
+    border-radius: 8px;
+    background: #fff;
+    color: #1a73e8;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.leaflet-popup-content .los-link {
+    margin: 8px 0 2px;
+}
+.leaflet-popup-content .los-hint {
+    color: #5a6a64;
+    font-size: 12px;
+}
+dialog.los {
+    width: min(94vw, 720px);
+    max-height: 92vh;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--ink);
+}
+dialog.los::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+.los-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.los-head h2 {
+    margin: 0;
+    font-size: 1.05rem;
+}
+#losClose {
+    width: 36px;
+    height: 36px;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+.los-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    align-items: center;
+    margin: 10px 0;
+    font-size: 0.9rem;
+}
+.los-controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.los-controls input[type="number"] {
+    width: 74px;
+    padding: 6px 8px;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+}
+#losVerdict {
+    margin: 6px 0;
+    min-height: 1.4em;
+}
+.los-good {
+    color: #1b7f4a;
+}
+.los-warn {
+    color: #a86400;
+}
+.los-bad {
+    color: #b3261e;
+}
+.los-distance {
+    color: var(--muted);
+    white-space: nowrap;
+}
+.los-note {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 8px 0 0;
+}
+dialog.los:focus {
+    outline: none;
+}

@@ -14,6 +14,7 @@ It is a static site: plain HTML, CSS and JavaScript with no build step and no se
 - **Collapsible lists:** the nearest list and a distance bar chart sit under the map, collapsed by default.
 - **Map rotation and compass:** rotate the map with the compass buttons, a two-finger twist on a phone, or Shift + drag on a computer. A compass rose shows north, and a toggle switches between **North locked** and **Following compass** (turns the map with your phone's heading).
 - **Popups:** site details, power, antenna height, polarisation, licence, distance from you and a Google Maps directions link.
+- **Line of sight:** once you have a position, each station's popup has a *Line of sight from you* button. It draws a chart of the ground between you and that station, with the earth's curve, the first Fresnel zone and a straight line between the two antennas, and says whether the path is clear, marginal or blocked. You can change both antenna heights.
 - **Remembers your settings:** radio type, state, channel, filter text, map style, line options, last location and map view are saved in your browser, so it reopens where you left off.
 - **Four map styles:** Esri Streets, CARTO, Esri Satellite and OpenStreetMap.
 ## Files
@@ -85,6 +86,7 @@ If the download fails with `getaddrinfo failed`, your computer could not look up
 ## Notes and limits
  
 - Distances are straight-line, not driving distance.
+- Line of sight uses ground heights only (no buildings or trees), assumes the licensed antenna height or a 10 m default, and needs an internet connection to fetch the terrain tiles.
 - To use a UHF CB repeater, press the duplex button on your radio.
 - The compass needs a device with a compass sensor. On iPhone it needs https and a tap to grant permission. Compass mode always starts as North locked.
 - Map rotation uses the leaflet-rotate plugin. If it fails to load, the map still works but cannot rotate.
@@ -96,6 +98,7 @@ If the download fails with `getaddrinfo failed`, your computer could not look up
 - Map tiles: [OpenStreetMap](https://www.openstreetmap.org/copyright), [Esri](https://www.esri.com/), [CARTO](https://carto.com/basemaps/)
 - Address search: [Photon](https://photon.komoot.io/), [Open-Meteo Geocoding](https://open-meteo.com/en/docs/geocoding-api) and [Nominatim](https://nominatim.org/)
 - Directions links: [Google Maps URLs](https://developers.google.com/maps/documentation/urls/get-started)
+- Ground heights for line of sight: [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)
 The map tile and search services have their own usage policies. They suit light personal use.
  
 ## Licence

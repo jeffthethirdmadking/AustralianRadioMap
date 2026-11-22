@@ -66,6 +66,8 @@ const DEFAULT_SETTINGS = {
     showChannelLabels: true,
     baseMap: "Streets (Esri)",
     compassMode: "north", // "north" or "follow"
+    losYourHeight: 2, // line of sight: your antenna height in metres
+    losCurve: true, // line of sight: allow for the earth's curve
     liveGps: false, // true: keep following your position; false: take one reading
     location: null, // { lat, lon, label, query }
     view: null, // { lat, lon, zoom }
@@ -785,7 +787,11 @@ ${row("Power", s[FIELD.powerWatts] ? s[FIELD.powerWatts] + " W" : "")}
 ${row("Antenna height", s[FIELD.antennaHeightM] != null ? s[FIELD.antennaHeightM] + " m" : "")}
 ${row("Polarisation", polarisation)}${row("Licence", escapeHtml(s[FIELD.licenceNumber] || ""))}
 ${row("Licence date", escapeHtml(s[FIELD.licenceDate] || ""))}${row("Antenna", escapeHtml(s[FIELD.antennaType] || ""))}
-</dl>`;
+</dl>${
+        userPosition
+            ? `<p class="los-link"><button type="button" class="link-btn" data-los="${stations.indexOf(s)}">Line of sight from you</button></p>`
+            : `<p class="los-link los-hint">Set your location to see line of sight.</p>`
+    }`;
 }
 
 const directionsLink = (lat, lon) =>
@@ -2190,6 +2196,303 @@ function wireEvents() {
 }
 
 // ---------------------------------------------------------------------------
+// Line of sight. "Line of sight" in a station's popup draws the ground between you and that station
+// with a straight line from your antenna to theirs, so you can see whether a hill is in the way.
+//
+//  - Heights of the ground come from the free AWS terrain tiles (Terrarium PNGs: the red, green and
+//    blue of each pixel encode a height), sampled along the great-circle path between the two points.
+//  - The earth's curve is added to the ground (radio waves bend slightly, so 4/3 of the real radius).
+//  - The first Fresnel zone is the oval of space around the line that the radio signal needs mostly
+//    clear. 60% of it free is the usual rule of thumb for a good path.
+// Buildings and trees are not in the data, so this is a guide, not a guarantee.
+// ---------------------------------------------------------------------------
+
+const EARTH_RADIUS_M = 6371000;
+const EFFECTIVE_EARTH_K = 4 / 3;
+const TERRAIN_TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+const MAX_TERRAIN_TILES = 40;
+const FRESNEL_GOOD_FRACTION = 0.6;
+const DEFAULT_STATION_ANTENNA_M = 10; // used when the licence has no antenna height
+
+const terrainTiles = new Map(); // "z/x/y" -> Promise of { data, size }
+let lineOfSight = null; // { station, from, to, distances, elevations } for the open chart
+
+// A point part of the way along the great-circle path from a to b ([lat, lon] in degrees)
+function greatCirclePoint(a, b, fraction) {
+    const rad = Math.PI / 180;
+    const [lat1, lon1, lat2, lon2] = [a[0] * rad, a[1] * rad, b[0] * rad, b[1] * rad];
+    const angle = 2 * Math.asin(Math.sqrt(Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2));
+    if (angle === 0) return [a[0], a[1]];
+    const weightA = Math.sin((1 - fraction) * angle) / Math.sin(angle);
+    const weightB = Math.sin(fraction * angle) / Math.sin(angle);
+    const x = weightA * Math.cos(lat1) * Math.cos(lon1) + weightB * Math.cos(lat2) * Math.cos(lon2);
+    const y = weightA * Math.cos(lat1) * Math.sin(lon1) + weightB * Math.cos(lat2) * Math.sin(lon2);
+    const z = weightA * Math.sin(lat1) + weightB * Math.sin(lat2);
+    return [(Math.atan2(z, Math.hypot(x, y)) / rad), Math.atan2(y, x) / rad];
+}
+
+function loadTerrainTile(zoom, x, y) {
+    const key = `${zoom}/${x}/${y}`;
+    if (!terrainTiles.has(key)) {
+        terrainTiles.set(
+            key,
+            new Promise((resolve, reject) => {
+                const image = new Image();
+                image.crossOrigin = "anonymous"; // so the pixels can be read back
+                image.onload = () => {
+                    const canvas = document.createElement("canvas");
+                    canvas.width = image.width;
+                    canvas.height = image.height;
+                    const context = canvas.getContext("2d", { willReadFrequently: true });
+                    context.drawImage(image, 0, 0);
+                    resolve({ data: context.getImageData(0, 0, canvas.width, canvas.height).data, size: canvas.width });
+                };
+                image.onerror = () => {
+                    terrainTiles.delete(key); // allow a retry later
+                    reject(new Error("terrain tile failed to load"));
+                };
+                image.src = TERRAIN_TILE_URL.replace("{z}", zoom).replace("{x}", x).replace("{y}", y);
+            })
+        );
+    }
+    return terrainTiles.get(key);
+}
+
+// Height in metres at a position inside a tile, in pixels (fractions allowed), blended between the four
+// nearest pixels. Terrarium encoding: height = red * 256 + green + blue / 256 - 32768.
+function tileHeight(tile, pixelX, pixelY) {
+    const { data, size } = tile;
+    const px = Math.min(Math.max(pixelX - 0.5, 0), size - 1);
+    const py = Math.min(Math.max(pixelY - 0.5, 0), size - 1);
+    const x0 = Math.floor(px);
+    const y0 = Math.floor(py);
+    const x1 = Math.min(x0 + 1, size - 1);
+    const y1 = Math.min(y0 + 1, size - 1);
+    const at = (x, y) => {
+        const i = (y * size + x) * 4;
+        return data[i] * 256 + data[i + 1] + data[i + 2] / 256 - 32768;
+    };
+    const top = at(x0, y0) * (1 - (px - x0)) + at(x1, y0) * (px - x0);
+    const bottom = at(x0, y1) * (1 - (px - x0)) + at(x1, y1) * (px - x0);
+    return top * (1 - (py - y0)) + bottom * (py - y0);
+}
+
+// Ground heights from "from" to "to" (both [lat, lon]). Returns { distances (m), elevations (m) }.
+async function loadTerrainProfile(from, to) {
+    const totalM = distanceKm(from, to) * 1000;
+    const intervals = Math.min(240, Math.max(40, Math.round(totalM / 150))); // a sample about every 150 m
+    const points = Array.from({ length: intervals + 1 }, (_, i) => greatCirclePoint(from, to, i / intervals));
+
+    // Sharper tiles for short paths; if the path would need too many tiles, use coarser ones
+    let zoom = totalM <= 20000 ? 13 : totalM <= 60000 ? 12 : totalM <= 150000 ? 11 : 10;
+    let needed;
+    for (;;) {
+        needed = new Map();
+        points.forEach(([lat, lon]) => {
+            const [u, v] = unitMercator(lat, lon);
+            const x = Math.floor(u * 2 ** zoom);
+            const y = Math.floor(v * 2 ** zoom);
+            needed.set(`${x}/${y}`, [x, y]);
+        });
+        if (needed.size <= MAX_TERRAIN_TILES || zoom <= 6) break;
+        zoom--;
+    }
+    const tiles = new Map(await Promise.all([...needed].map(async ([key, [x, y]]) => [key, await loadTerrainTile(zoom, x, y)])));
+
+    const elevations = points.map(([lat, lon]) => {
+        const [u, v] = unitMercator(lat, lon);
+        const fx = u * 2 ** zoom;
+        const fy = v * 2 ** zoom;
+        const tile = tiles.get(`${Math.floor(fx)}/${Math.floor(fy)}`);
+        // below 0 is sea floor in this data, but radio only cares about the surface
+        return Math.max(0, tileHeight(tile, (fx - Math.floor(fx)) * tile.size, (fy - Math.floor(fy)) * tile.size));
+    });
+    return { distances: points.map((_, i) => (i / intervals) * totalM), elevations };
+}
+
+// The maths. distances and elevations are in metres. Returns what the chart and the verdict need.
+function analyseLineOfSight({ distances, elevations, fromHeight, toHeight, frequencyMhz, curvature }) {
+    const last = distances.length - 1;
+    const total = distances[last];
+    // How far the earth's curve lifts the ground between the two ends, in metres
+    const bulge = distances.map((d) => (curvature ? (d * (total - d)) / (2 * EFFECTIVE_EARTH_K * EARTH_RADIUS_M) : 0));
+    const ground = elevations.map((height, i) => height + bulge[i]);
+    const startHeight = elevations[0] + fromHeight;
+    const endHeight = elevations[last] + toHeight;
+    const line = distances.map((d) => startHeight + ((endHeight - startHeight) * d) / total);
+    const fresnel = distances.map((d) => 17.32 * Math.sqrt(((d / 1000) * ((total - d) / 1000)) / ((frequencyMhz / 1000) * (total / 1000))));
+
+    let worstClearance = Infinity;
+    let worstClearanceIndex = 1;
+    let worstFraction = Infinity;
+    let worstFractionIndex = 1;
+    for (let i = 1; i < last; i++) {
+        const clearance = line[i] - ground[i];
+        if (clearance < worstClearance) {
+            worstClearance = clearance;
+            worstClearanceIndex = i;
+        }
+        const fraction = clearance / fresnel[i];
+        if (fraction < worstFraction) {
+            worstFraction = fraction;
+            worstFractionIndex = i;
+        }
+    }
+    const interior = last > 1;
+    const status = !interior ? "clear" : worstClearance < 0 ? "blocked" : worstFraction < FRESNEL_GOOD_FRACTION ? "marginal" : "clear";
+    return { distances, ground, line, fresnel, total, status, worstClearance, worstClearanceIndex, worstFraction, worstFractionIndex };
+}
+
+// A tidy step size for axis labels
+function niceStep(range, maxTicks, steps) {
+    return steps.find((step) => range / step <= maxTicks) || steps[steps.length - 1];
+}
+
+// The chart, as an SVG string. Ground (with the earth's curve), Fresnel zone, line of sight, and a red
+// marker where the path is blocked or tightest.
+function lineOfSightChartSvg(analysis, labels) {
+    const { distances, ground, line, fresnel, total } = analysis;
+    const width = 680;
+    const height = 300;
+    const margin = { left: 52, right: 16, top: 22, bottom: 40 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+
+    const bandTop = line.map((value, i) => value + FRESNEL_GOOD_FRACTION * fresnel[i]);
+    const bandBottom = line.map((value, i) => value - FRESNEL_GOOD_FRACTION * fresnel[i]);
+    let low = Math.min(...ground, ...bandBottom);
+    let high = Math.max(...ground, ...bandTop);
+    const pad = Math.max(10, (high - low) * 0.08);
+    low = Math.floor((low - pad) / 10) * 10;
+    high = Math.ceil((high + pad) / 10) * 10;
+    if (high - low < 30) high = low + 30;
+
+    const x = (metres) => margin.left + (metres / total) * plotWidth;
+    const y = (metres) => margin.top + (1 - (metres - low) / (high - low)) * plotHeight;
+    const path = (values) => values.map((value, i) => `${x(distances[i]).toFixed(1)},${y(value).toFixed(1)}`);
+
+    const kmStep = niceStep(total / 1000, 8, [0.5, 1, 2, 5, 10, 20, 50, 100, 200]);
+    const mStep = niceStep(high - low, 6, [5, 10, 20, 50, 100, 200, 500, 1000]);
+    let grid = "";
+    for (let km = 0; km * 1000 <= total + 1; km += kmStep) {
+        grid += `<line x1="${x(km * 1000)}" x2="${x(km * 1000)}" y1="${margin.top}" y2="${margin.top + plotHeight}" stroke="currentColor" stroke-opacity="0.1"/>` +
+            `<text x="${x(km * 1000)}" y="${height - 20}" text-anchor="middle" font-size="11" fill="currentColor">${km % 1 ? km.toFixed(1) : km}</text>`;
+    }
+    for (let metres = Math.ceil(low / mStep) * mStep; metres <= high; metres += mStep) {
+        grid += `<line x1="${margin.left}" x2="${margin.left + plotWidth}" y1="${y(metres)}" y2="${y(metres)}" stroke="currentColor" stroke-opacity="0.1"/>` +
+            `<text x="${margin.left - 6}" y="${y(metres) + 4}" text-anchor="end" font-size="11" fill="currentColor">${metres}</text>`;
+    }
+
+    const bottom = margin.top + plotHeight;
+    const groundArea = `${x(0)},${bottom} ${path(ground).join(" ")} ${x(total)},${bottom}`;
+    const band = `${path(bandTop).join(" ")} ${path(bandBottom).reverse().join(" ")}`;
+
+    let marker = "";
+    if (analysis.status !== "clear") {
+        const i = analysis.status === "blocked" ? analysis.worstClearanceIndex : analysis.worstFractionIndex;
+        const note = analysis.status === "blocked" ? `${Math.round(-analysis.worstClearance)} m in the way` : `${Math.round(analysis.worstFraction * 100)}% clear`;
+        const labelX = Math.min(Math.max(x(distances[i]), margin.left + 50), margin.left + plotWidth - 50);
+        marker =
+            `<circle cx="${x(distances[i])}" cy="${y(ground[i])}" r="5" fill="#b3261e" stroke="#fff" stroke-width="1.5"/>` +
+            `<text x="${labelX}" y="${Math.max(margin.top + 12, y(ground[i]) - 12)}" text-anchor="middle" font-size="12" font-weight="700" fill="#b3261e">${note}</text>`;
+    }
+    const end = (index, label, anchor) => {
+        const dx = anchor === "start" ? 8 : -8;
+        return `<line x1="${x(distances[index])}" x2="${x(distances[index])}" y1="${y(ground[index])}" y2="${y(line[index])}" stroke="currentColor" stroke-width="2"/>` +
+            `<circle cx="${x(distances[index])}" cy="${y(line[index])}" r="4" fill="#1a73e8" stroke="#fff" stroke-width="1.5"/>` +
+            `<text x="${x(distances[index]) + dx}" y="${y(line[index]) - 8}" text-anchor="${anchor}" font-size="12" font-weight="700" fill="currentColor">${escapeHtml(label)}</text>`;
+    };
+
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Line of sight chart" style="width:100%;height:auto;color:inherit">
+${grid}
+<polygon points="${groundArea}" fill="#a8b5a0" stroke="#6f7f69" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="${band}" fill="#1a73e8" fill-opacity="0.16"/>
+<polyline points="${path(line).join(" ")}" fill="none" stroke="#1a73e8" stroke-width="2.5"/>
+${marker}${end(0, labels.from, "start")}${end(distances.length - 1, labels.to, "end")}
+<text x="${margin.left + plotWidth / 2}" y="${height - 4}" text-anchor="middle" font-size="12" fill="currentColor">Distance (km)</text>
+<text x="14" y="${margin.top + plotHeight / 2}" text-anchor="middle" font-size="12" fill="currentColor" transform="rotate(-90 14 ${margin.top + plotHeight / 2})">Height (m)</text>
+</svg>`;
+}
+
+// ---- the dialog ----
+
+function renderLineOfSight() {
+    if (!lineOfSight || !lineOfSight.elevations) return;
+    const { station, distances, elevations } = lineOfSight;
+    const fromHeight = Math.max(0, parseFloat(el("losYourHeight").value) || 0);
+    const toHeight = Math.max(0, parseFloat(el("losStationHeight").value) || 0);
+    const analysis = analyseLineOfSight({
+        distances,
+        elevations,
+        fromHeight,
+        toHeight,
+        frequencyMhz: station[FIELD.outputMhz],
+        curvature: el("losCurve").checked,
+    });
+    const km = (index) => (distances[index] / 1000).toFixed(1);
+    // Clearance as a share of the first Fresnel zone's radius at the tightest point
+    const percent = analysis.worstFraction >= 1 ? "100%+" : `${Math.max(0, Math.round(analysis.worstFraction * 100))}%`;
+    const verdict = {
+        blocked: `<strong class="los-bad">Blocked.</strong> Ground rises ${Math.round(-analysis.worstClearance)} m above the line ${km(analysis.worstClearanceIndex)} km from you.`,
+        marginal: `<strong class="los-warn">Line of sight, but marginal.</strong> Only ${percent} of the first Fresnel zone is clear at ${km(analysis.worstFractionIndex)} km, so the signal may be weak or fade.`,
+        clear: `<strong class="los-good">Clear line of sight.</strong> The first Fresnel zone is clear (${percent} at the tightest point; 60% or more is good).`,
+    }[analysis.status];
+    el("losVerdict").innerHTML = `${verdict} <span class="los-distance">${(analysis.total / 1000).toFixed(1)} km path</span>`;
+    el("losChart").innerHTML = lineOfSightChartSvg(analysis, { from: "You", to: station[FIELD.siteName] || station[FIELD.callSign] || "Station" });
+}
+
+async function openLineOfSight(station) {
+    if (!userPosition) return;
+    if (mapIsFullscreen) setMapFullscreen(false); // the chart is a page dialog, not part of the map
+    const from = [userPosition[0], userPosition[1]];
+    const to = [station[FIELD.lat], station[FIELD.lon]];
+    lineOfSight = { station, from, to };
+
+    el("losTitle").textContent = `Line of sight to ${station[FIELD.siteName] || station[FIELD.callSign] || "station"}`;
+    el("losYourHeight").value = settings.losYourHeight;
+    el("losStationHeight").value = station[FIELD.antennaHeightM] > 0 ? station[FIELD.antennaHeightM] : DEFAULT_STATION_ANTENNA_M;
+    el("losCurve").checked = settings.losCurve;
+    el("losVerdict").textContent = "Loading terrain data…";
+    el("losChart").innerHTML = "";
+    if (!el("losDialog").open) el("losDialog").showModal();
+    el("losDialog").focus(); // so the close button isn't highlighted as if it were selected
+
+    try {
+        const profile = await loadTerrainProfile(from, to);
+        if (!lineOfSight || lineOfSight.station !== station) return; // closed or replaced meanwhile
+        Object.assign(lineOfSight, profile);
+        renderLineOfSight();
+    } catch (error) {
+        el("losVerdict").textContent = "Couldn’t load the terrain data. This needs an internet connection.";
+    }
+}
+
+function wireLineOfSight() {
+    // The popup stops clicks reaching the page, so listen on each popup itself
+    map.on("popupopen", (event) => {
+        const node = event.popup.getElement();
+        if (!node) return;
+        node.addEventListener("click", (click) => {
+            const button = click.target.closest("[data-los]");
+            if (button) openLineOfSight(stations[+button.dataset.los]);
+        });
+    });
+    ["losYourHeight", "losStationHeight", "losCurve"].forEach((id) =>
+        el(id).addEventListener("input", () => {
+            settings.losYourHeight = Math.max(0, parseFloat(el("losYourHeight").value) || 0);
+            settings.losCurve = el("losCurve").checked;
+            saveSettings();
+            renderLineOfSight();
+        })
+    );
+    el("losClose").onclick = () => el("losDialog").close();
+    el("losDialog").addEventListener("click", (event) => {
+        if (event.target === el("losDialog")) el("losDialog").close(); // a click on the dimmed backdrop
+    });
+    el("losDialog").addEventListener("close", () => (lineOfSight = null));
+}
+
+// ---------------------------------------------------------------------------
 // Start up
 // ---------------------------------------------------------------------------
 
@@ -2237,6 +2540,7 @@ async function init() {
     el("datasource").textContent = "Station data loaded from the " + loaded.source + ".";
 
     wireEvents();
+    wireLineOfSight();
 
     // Restore the last search location and map view
     const hadSavedView = !!settings.view;

@@ -885,3 +885,86 @@ dialog.los::backdrop {
 dialog.los:focus {
     outline: none;
 }
+
+.los-detail {
+    margin: 10px 0 0;
+    padding: 12px;
+    border: 2px solid var(--line);
+    border-left-width: 6px;
+    border-radius: 10px;
+    background: var(--bg);
+}
+.los-detail:empty {
+    display: none;
+}
+.los-detail-blocked {
+    border-color: #b3261e;
+}
+.los-detail-marginal {
+    border-color: #a86400;
+}
+.los-detail-clear {
+    border-color: #1b7f4a;
+}
+.los-detail-title {
+    font-size: 1.1rem;
+    font-weight: 800;
+}
+.los-detail-blocked .los-detail-title {
+    color: #b3261e;
+}
+.los-detail-marginal .los-detail-title {
+    color: #a86400;
+}
+.los-detail-clear .los-detail-title {
+    color: #1b7f4a;
+}
+.los-detail-line {
+    margin-top: 4px;
+    font-size: 1rem;
+}
+.los-detail-facts {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+.los-map-btn {
+    margin-top: 10px;
+    width: 100%;
+    min-height: 46px;
+    font-size: 1rem;
+}
+#losVerdict {
+    font-size: 1.15rem;
+}
+
+/* Easier to press on a phone: bigger controls, and the chart dialog as a sheet from the bottom */
+@media (max-width: 600px) {
+    dialog.los {
+        width: 100%;
+        max-width: 100%;
+        max-height: 94dvh;
+        margin: auto 0 0;
+        padding: 12px;
+        border-radius: 16px 16px 0 0;
+    }
+    #losClose {
+        width: 46px;
+        height: 46px;
+    }
+    .los-controls {
+        gap: 8px 12px;
+    }
+    .los-controls input[type="number"] {
+        width: 84px;
+        height: 46px;
+        font-size: 1rem;
+    }
+    .los-controls input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+    }
+    dialog.los .los-controls label {
+        min-height: 46px;
+    }
+}

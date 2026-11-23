@@ -862,6 +862,7 @@ const USER_COLOUR = "#1a73e8";
 const SPOT_DOT_RADIUS = 10; // marker for several stations at one position
 
 let visibleStations = []; // stations passing the current filters
+let lastBubbles = []; // the bubbles painted in the last frame: [{ spots, content, box }]
 let visibleSpots = []; // [{ key, lat, lon, stations }]: stations at the same position share one marker
 let spotByKey = new Map();
 let visibleWorld = new Float64Array(0); // x, y of each visible spot in unit Web Mercator (0 to 1)
@@ -1183,17 +1184,18 @@ function roundedRectPath(ctx, x, y, width, height, radius) {
 // would overlap, the ones that overlap are joined into a single bubble that lists all their nodes.
 // ---------------------------------------------------------------------------
 
-const BUBBLE_FONT = "600 12px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-const BUBBLE_SMALL_FONT = "400 11px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-const BUBBLE_PADDING = 9;
-const BUBBLE_MARKER_COLUMN = 20; // space for the coloured marker at the start of each row
-const BUBBLE_ROW_GAP = 6;
-const BUBBLE_SECTION_GAP = 12; // between the nodes of a joined bubble
-const BUBBLE_TITLE_HEIGHT = 15;
-const BUBBLE_DETAIL_HEIGHT = 13;
+const BUBBLE_FONT = "600 11px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const BUBBLE_SMALL_FONT = "400 10px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const BUBBLE_PADDING = 6;
+const BUBBLE_MARKER_COLUMN = 15; // space for the coloured marker at the start of each row
+const BUBBLE_ROW_GAP = 3;
+const BUBBLE_SECTION_GAP = 7; // between the nodes of a joined bubble
+const BUBBLE_TITLE_HEIGHT = 13;
+const BUBBLE_DETAIL_HEIGHT = 11;
+const BUBBLE_HEADER_GAP = 2;
 const MAX_BUBBLE_ROWS = 4; // stations shown in a bubble for one node
 const MAX_JOINED_ROWS = 8; // stations shown in a joined bubble; the rest are in the markers' popups
-const LABEL_GAP = 4; // bubbles closer than this count as overlapping
+const LABEL_GAP = 3; // bubbles closer than this count as overlapping
 const JOINED_ACCENT = "#17231f";
 const NARROW_MAP_WIDTH = 520; // below this, RX and TX go on separate lines so bubbles are narrower
 
@@ -1210,7 +1212,7 @@ function textWidth(ctx, font, text) {
 const spotRadius = (spot) => (spot.stations.length > 1 ? SPOT_DOT_RADIUS : isEmergency(spot.stations[0]) ? EMERGENCY_DOT_RADIUS : DOT_RADIUS);
 
 // What a bubble says. spots = the node or nodes it covers, nearest first; spot = { km, stations }.
-// One section per node, one row per station.
+// One section per node, one row per station. Each section remembers its node so a tap can open it.
 function bubbleContentFor(spots) {
     const joined = spots.length > 1;
     let budget = joined ? MAX_JOINED_ROWS : MAX_BUBBLE_ROWS;
@@ -1224,15 +1226,16 @@ function bubbleContentFor(spots) {
         hidden += spot.stations.length - shown.length;
         if (!shown.length) return;
         sections.push({
+            spot,
             header: multi ? [distance, `${spot.stations.length} stations`].filter(Boolean).join(" \u00b7 ") : "",
             rows: shown.map((station) => {
                 const type = TYPE_LABEL[station[FIELD.radioType]] || "Station";
                 let details = [];
                 if (settings.showChannelLabels) {
                     if (isCb(station)) {
-                        const rx = `RX ${station[FIELD.channel]} \u00b7 ${fmtMhz(station[FIELD.outputMhz])}`;
-                        const tx = `TX ${cbTxChannel(station)} \u00b7 ${fmtMhz(cbTxMhz(station))}`;
-                        details = map.getSize().x < NARROW_MAP_WIDTH ? [rx, tx] : [`${rx}   ${tx}`];
+                        const rx = `RX ${station[FIELD.channel]} ${fmtMhz(station[FIELD.outputMhz])}`;
+                        const tx = `TX ${cbTxChannel(station)} ${fmtMhz(cbTxMhz(station))}`;
+                        details = map.getSize().x < NARROW_MAP_WIDTH ? [rx, tx] : [`${rx}  \u00b7  ${tx}`];
                     } else {
                         details = [`RX ${fmtMhz(station[FIELD.outputMhz])} MHz`];
                     }
@@ -1251,7 +1254,8 @@ function bubbleContentFor(spots) {
         sections,
         // A bubble for one node is outlined in its line's colour so it can be matched to the line
         accent: joined ? JOINED_ACCENT : stationColour(spots[0].stations[0]),
-        hiddenText: hidden ? `+${hidden} more (tap the markers)` : "",
+        hiddenText: hidden ? `+${hidden} more` : "",
+        hits: [], // filled in when drawn: where each node's section is, for taps
     };
 }
 
@@ -1262,10 +1266,10 @@ function bubbleSize(ctx, content) {
         if (sectionIndex > 0) height += BUBBLE_SECTION_GAP;
         if (section.header) {
             widest = Math.max(widest, textWidth(ctx, BUBBLE_FONT, section.header) - BUBBLE_MARKER_COLUMN);
-            height += BUBBLE_TITLE_HEIGHT + 4;
+            height += BUBBLE_TITLE_HEIGHT + BUBBLE_HEADER_GAP;
         }
         section.rows.forEach((row, rowIndex) => {
-            const top = textWidth(ctx, BUBBLE_FONT, row.title) + (row.distance ? 12 + textWidth(ctx, BUBBLE_FONT, row.distance) : 0);
+            const top = textWidth(ctx, BUBBLE_FONT, row.title) + (row.distance ? 10 + textWidth(ctx, BUBBLE_FONT, row.distance) : 0);
             const detail = Math.max(0, ...row.details.map((line) => textWidth(ctx, BUBBLE_SMALL_FONT, line)));
             widest = Math.max(widest, top, detail);
             height += BUBBLE_TITLE_HEIGHT + row.details.length * BUBBLE_DETAIL_HEIGHT;
@@ -1274,7 +1278,7 @@ function bubbleSize(ctx, content) {
     });
     if (content.hiddenText) {
         widest = Math.max(widest, textWidth(ctx, BUBBLE_SMALL_FONT, content.hiddenText));
-        height += BUBBLE_DETAIL_HEIGHT + 4;
+        height += BUBBLE_DETAIL_HEIGHT + 2;
     }
     return { width: BUBBLE_PADDING * 2 + BUBBLE_MARKER_COLUMN + widest, height };
 }
@@ -1283,25 +1287,27 @@ function drawBubble(ctx, content, box) {
     const left = box.x - box.width / 2;
     const top = box.y - box.height / 2;
     const textLeft = left + BUBBLE_PADDING + BUBBLE_MARKER_COLUMN;
+    content.hits = [];
 
     ctx.save();
-    ctx.shadowColor = "rgba(0,0,0,0.28)";
-    ctx.shadowBlur = 8;
-    ctx.shadowOffsetY = 2;
+    ctx.shadowColor = "rgba(0,0,0,0.25)";
+    ctx.shadowBlur = 5;
+    ctx.shadowOffsetY = 1.5;
     ctx.beginPath();
-    roundedRectPath(ctx, left, top, box.width, box.height, 9);
+    roundedRectPath(ctx, left, top, box.width, box.height, 7);
     ctx.fillStyle = "rgba(255,255,255,0.97)";
     ctx.fill();
     ctx.restore();
     ctx.beginPath();
-    roundedRectPath(ctx, left, top, box.width, box.height, 9);
+    roundedRectPath(ctx, left, top, box.width, box.height, 7);
     ctx.strokeStyle = content.accent;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.75;
     ctx.stroke();
 
     ctx.textBaseline = "middle";
     let y = top + BUBBLE_PADDING;
     content.sections.forEach((section, sectionIndex) => {
+        const sectionTop = sectionIndex === 0 ? top : y - BUBBLE_SECTION_GAP / 2 + (sectionIndex > 0 ? BUBBLE_SECTION_GAP : 0);
         if (sectionIndex > 0) {
             ctx.beginPath(); // thin line between the nodes of a joined bubble
             ctx.moveTo(left + BUBBLE_PADDING, y + BUBBLE_SECTION_GAP / 2);
@@ -1311,27 +1317,28 @@ function drawBubble(ctx, content, box) {
             ctx.stroke();
             y += BUBBLE_SECTION_GAP;
         }
+        const hitTop = sectionIndex === 0 ? top : y - BUBBLE_SECTION_GAP / 2;
         if (section.header) {
             ctx.fillStyle = "#17231f";
             ctx.font = BUBBLE_FONT;
             ctx.textAlign = "left";
             ctx.fillText(section.header, left + BUBBLE_PADDING, y + BUBBLE_TITLE_HEIGHT / 2);
-            y += BUBBLE_TITLE_HEIGHT + 4;
+            y += BUBBLE_TITLE_HEIGHT + BUBBLE_HEADER_GAP;
         }
         section.rows.forEach((row, rowIndex) => {
             const middle = y + BUBBLE_TITLE_HEIGHT / 2;
-            const markerX = left + BUBBLE_PADDING + 6;
+            const markerX = left + BUBBLE_PADDING + 4.5;
             ctx.beginPath(); // marker: white ring, then the type colour
-            ctx.arc(markerX, middle, 7, 0, TAU);
+            ctx.arc(markerX, middle, 5.5, 0, TAU);
             ctx.fillStyle = "#fff";
             ctx.fill();
             ctx.beginPath();
-            ctx.arc(markerX, middle, 5.5, 0, TAU);
+            ctx.arc(markerX, middle, 4.25, 0, TAU);
             ctx.fillStyle = row.colour;
             ctx.fill();
             if (row.emergency) {
                 ctx.fillStyle = "#fff";
-                ctx.font = "800 8px system-ui, sans-serif";
+                ctx.font = "800 7px system-ui, sans-serif";
                 ctx.textAlign = "center";
                 ctx.fillText("!", markerX, middle + 0.5);
             }
@@ -1353,12 +1360,13 @@ function drawBubble(ctx, content, box) {
             });
             if (rowIndex < section.rows.length - 1) y += BUBBLE_ROW_GAP;
         });
+        content.hits.push({ top: hitTop, bottom: y + (sectionIndex < content.sections.length - 1 ? BUBBLE_SECTION_GAP / 2 : BUBBLE_PADDING + 2), spot: section.spot });
     });
     if (content.hiddenText) {
         ctx.fillStyle = "#5a6a64";
         ctx.font = BUBBLE_SMALL_FONT;
         ctx.textAlign = "left";
-        ctx.fillText(content.hiddenText, textLeft, y + 4 + BUBBLE_DETAIL_HEIGHT / 2);
+        ctx.fillText(content.hiddenText, textLeft, y + 2 + BUBBLE_DETAIL_HEIGHT / 2);
     }
 }
 
@@ -1510,6 +1518,7 @@ function paintStations() {
 }
 
 function paintOverlays(ctx, size, ratio) {
+    lastBubbles = [];
     const view = getViewTransform();
     const point = { x: 0, y: 0 };
 
@@ -1589,7 +1598,8 @@ function paintOverlays(ctx, size, ratio) {
 
     // The bubbles, drawn under your dot so your position stays visible
     if (labelled && (settings.showDistanceLabels || settings.showChannelLabels)) {
-        layoutBubbles(ctx, nearestSpots, userPoint, size).forEach((bubble) => drawBubble(ctx, bubble.content, bubble.box));
+        lastBubbles = layoutBubbles(ctx, nearestSpots, userPoint, size);
+        lastBubbles.forEach((bubble) => drawBubble(ctx, bubble.content, bubble.box));
     }
 
     // Heading arrow while following the phone's compass. True north sits at +bearing on screen (the
@@ -1642,6 +1652,17 @@ map.on("popupopen popupclose", requestStationRepaint);
 map.on("click", (event) => {
     const tap = map.latLngToContainerPoint(event.latlng);
     const reach = L.Browser.touch ? 20 : 12;
+    // A tap on a bubble opens the node it belongs to (the section of a joined bubble that was tapped)
+    const bubble = lastBubbles.find(
+        (b) => Math.abs(tap.x - b.box.x) <= b.box.width / 2 + 3 && Math.abs(tap.y - b.box.y) <= b.box.height / 2 + 3
+    );
+    if (bubble) {
+        const hit = bubble.content.hits.find((h) => tap.y >= h.top && tap.y <= h.bottom) || bubble.content.hits[0];
+        const first = hit.spot.stations[0];
+        const markerSpot = spotByKey.get(spotKeyFor(first)) || { lat: first[FIELD.lat], lon: first[FIELD.lon], stations: hit.spot.stations };
+        openSpotPopup(markerSpot);
+        return;
+    }
     if (userPosition) {
         const dot = map.latLngToContainerPoint(userPosition);
         if ((dot.x - tap.x) ** 2 + (dot.y - tap.y) ** 2 < (USER_DOT_RADIUS + reach / 2) ** 2) {
@@ -2215,7 +2236,8 @@ const FRESNEL_GOOD_FRACTION = 0.6;
 const DEFAULT_STATION_ANTENNA_M = 10; // used when the licence has no antenna height
 
 const terrainTiles = new Map(); // "z/x/y" -> Promise of { data, size }
-let lineOfSight = null; // { station, from, to, distances, elevations } for the open chart
+let lineOfSight = null; // { station, from, to, distances, elevations, analysis } for the open chart
+let losMarker = null; // the red spot on the map showing where the path is blocked
 
 // A point part of the way along the great-circle path from a to b ([lat, lon] in degrees)
 function greatCirclePoint(a, b, fraction) {
@@ -2348,13 +2370,13 @@ function niceStep(range, maxTicks, steps) {
     return steps.find((step) => range / step <= maxTicks) || steps[steps.length - 1];
 }
 
-// The chart, as an SVG string. Ground (with the earth's curve), Fresnel zone, line of sight, and a red
-// marker where the path is blocked or tightest.
-function lineOfSightChartSvg(analysis, labels) {
+// The chart, as an SVG string, drawn at the width it will be shown at (so the text is a true size on a
+// phone instead of shrinking with the picture). Ground (with the earth's curve), the Fresnel zone, the line
+// of sight, and a marker where the path is blocked or tightest.
+function lineOfSightChartSvg(analysis, labels, width) {
     const { distances, ground, line, fresnel, total } = analysis;
-    const width = 680;
-    const height = 300;
-    const margin = { left: 52, right: 16, top: 22, bottom: 40 };
+    const height = Math.round(Math.min(340, Math.max(230, width * 0.62)));
+    const margin = { left: 40, right: 10, top: 48, bottom: 36 };
     const plotWidth = width - margin.left - margin.right;
     const plotHeight = height - margin.top - margin.bottom;
 
@@ -2371,46 +2393,56 @@ function lineOfSightChartSvg(analysis, labels) {
     const y = (metres) => margin.top + (1 - (metres - low) / (high - low)) * plotHeight;
     const path = (values) => values.map((value, i) => `${x(distances[i]).toFixed(1)},${y(value).toFixed(1)}`);
 
-    const kmStep = niceStep(total / 1000, 8, [0.5, 1, 2, 5, 10, 20, 50, 100, 200]);
-    const mStep = niceStep(high - low, 6, [5, 10, 20, 50, 100, 200, 500, 1000]);
+    const kmStep = niceStep(total / 1000, Math.max(3, Math.floor(plotWidth / 60)), [0.5, 1, 2, 5, 10, 20, 50, 100, 200]);
+    const mStep = niceStep(high - low, Math.max(3, Math.floor(plotHeight / 40)), [5, 10, 20, 50, 100, 200, 500, 1000]);
     let grid = "";
     for (let km = 0; km * 1000 <= total + 1; km += kmStep) {
         grid += `<line x1="${x(km * 1000)}" x2="${x(km * 1000)}" y1="${margin.top}" y2="${margin.top + plotHeight}" stroke="currentColor" stroke-opacity="0.1"/>` +
-            `<text x="${x(km * 1000)}" y="${height - 20}" text-anchor="middle" font-size="11" fill="currentColor">${km % 1 ? km.toFixed(1) : km}</text>`;
+            `<text x="${x(km * 1000)}" y="${height - 18}" text-anchor="middle" font-size="12" fill="currentColor">${km % 1 ? km.toFixed(1) : km}</text>`;
     }
     for (let metres = Math.ceil(low / mStep) * mStep; metres <= high; metres += mStep) {
         grid += `<line x1="${margin.left}" x2="${margin.left + plotWidth}" y1="${y(metres)}" y2="${y(metres)}" stroke="currentColor" stroke-opacity="0.1"/>` +
-            `<text x="${margin.left - 6}" y="${y(metres) + 4}" text-anchor="end" font-size="11" fill="currentColor">${metres}</text>`;
+            `<text x="${margin.left - 5}" y="${y(metres) + 4}" text-anchor="end" font-size="12" fill="currentColor">${metres}</text>`;
     }
 
     const bottom = margin.top + plotHeight;
     const groundArea = `${x(0)},${bottom} ${path(ground).join(" ")} ${x(total)},${bottom}`;
     const band = `${path(bandTop).join(" ")} ${path(bandBottom).reverse().join(" ")}`;
 
+    // The marker where the path is blocked (red) or tightest (amber). The label is a solid pill in a real
+    // 14 px bold, white behind coloured text, so it reads over the ground, the zone and in either theme.
     let marker = "";
     if (analysis.status !== "clear") {
         const i = analysis.status === "blocked" ? analysis.worstClearanceIndex : analysis.worstFractionIndex;
+        const colour = analysis.status === "blocked" ? "#b3261e" : "#a86400";
         const note = analysis.status === "blocked" ? `${Math.round(-analysis.worstClearance)} m in the way` : `${Math.round(analysis.worstFraction * 100)}% clear`;
-        const labelX = Math.min(Math.max(x(distances[i]), margin.left + 50), margin.left + plotWidth - 50);
+        const pointX = x(distances[i]);
+        const pointY = y(ground[i]);
+        const labelWidth = note.length * 8.4 + 22;
+        const labelHeight = 28;
+        const labelX = Math.min(Math.max(pointX, labelWidth / 2 + 4), width - labelWidth / 2 - 4);
+        const above = pointY - 14 - labelHeight > 4;
+        const labelY = above ? pointY - 14 - labelHeight : pointY + 14;
         marker =
-            `<circle cx="${x(distances[i])}" cy="${y(ground[i])}" r="5" fill="#b3261e" stroke="#fff" stroke-width="1.5"/>` +
-            `<text x="${labelX}" y="${Math.max(margin.top + 12, y(ground[i]) - 12)}" text-anchor="middle" font-size="12" font-weight="700" fill="#b3261e">${note}</text>`;
+            `<line x1="${pointX}" x2="${labelX}" y1="${pointY}" y2="${above ? labelY + labelHeight : labelY}" stroke="${colour}" stroke-width="2"/>` +
+            `<circle cx="${pointX}" cy="${pointY}" r="8" fill="${colour}" stroke="#fff" stroke-width="3"/>` +
+            `<rect x="${labelX - labelWidth / 2}" y="${labelY}" width="${labelWidth}" height="${labelHeight}" rx="8" fill="#fff" stroke="${colour}" stroke-width="2.5"/>` +
+            `<text x="${labelX}" y="${labelY + 19}" text-anchor="middle" font-size="14" font-weight="800" fill="${colour}">${note}</text>`;
     }
     const end = (index, label, anchor) => {
         const dx = anchor === "start" ? 8 : -8;
         return `<line x1="${x(distances[index])}" x2="${x(distances[index])}" y1="${y(ground[index])}" y2="${y(line[index])}" stroke="currentColor" stroke-width="2"/>` +
-            `<circle cx="${x(distances[index])}" cy="${y(line[index])}" r="4" fill="#1a73e8" stroke="#fff" stroke-width="1.5"/>` +
-            `<text x="${x(distances[index]) + dx}" y="${y(line[index]) - 8}" text-anchor="${anchor}" font-size="12" font-weight="700" fill="currentColor">${escapeHtml(label)}</text>`;
+            `<circle cx="${x(distances[index])}" cy="${y(line[index])}" r="5" fill="#1a73e8" stroke="#fff" stroke-width="2"/>` +
+            `<text x="${x(distances[index]) + dx}" y="${y(line[index]) - 11}" text-anchor="${anchor}" font-size="13" font-weight="700" fill="currentColor" style="paint-order:stroke;stroke:var(--surface);stroke-width:4px;stroke-linejoin:round">${escapeHtml(label)}</text>`;
     };
 
-    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Line of sight chart" style="width:100%;height:auto;color:inherit">
+    return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Line of sight chart" style="display:block;max-width:100%;height:auto;color:inherit">
 ${grid}
 <polygon points="${groundArea}" fill="#a8b5a0" stroke="#6f7f69" stroke-width="1.5" stroke-linejoin="round"/>
 <polygon points="${band}" fill="#1a73e8" fill-opacity="0.16"/>
-<polyline points="${path(line).join(" ")}" fill="none" stroke="#1a73e8" stroke-width="2.5"/>
+<polyline points="${path(line).join(" ")}" fill="none" stroke="#1a73e8" stroke-width="3"/>
 ${marker}${end(0, labels.from, "start")}${end(distances.length - 1, labels.to, "end")}
-<text x="${margin.left + plotWidth / 2}" y="${height - 4}" text-anchor="middle" font-size="12" fill="currentColor">Distance (km)</text>
-<text x="14" y="${margin.top + plotHeight / 2}" text-anchor="middle" font-size="12" fill="currentColor" transform="rotate(-90 14 ${margin.top + plotHeight / 2})">Height (m)</text>
+<text x="${margin.left + plotWidth / 2}" y="${height - 3}" text-anchor="middle" font-size="12" fill="currentColor">Distance (km)</text>
 </svg>`;
 }
 
@@ -2418,7 +2450,7 @@ ${marker}${end(0, labels.from, "start")}${end(distances.length - 1, labels.to, "
 
 function renderLineOfSight() {
     if (!lineOfSight || !lineOfSight.elevations) return;
-    const { station, distances, elevations } = lineOfSight;
+    const { station, from, to, distances, elevations } = lineOfSight;
     const fromHeight = Math.max(0, parseFloat(el("losYourHeight").value) || 0);
     const toHeight = Math.max(0, parseFloat(el("losStationHeight").value) || 0);
     const analysis = analyseLineOfSight({
@@ -2429,16 +2461,63 @@ function renderLineOfSight() {
         frequencyMhz: station[FIELD.outputMhz],
         curvature: el("losCurve").checked,
     });
-    const km = (index) => (distances[index] / 1000).toFixed(1);
-    // Clearance as a share of the first Fresnel zone's radius at the tightest point
+    lineOfSight.analysis = analysis;
+
+    const stationName = station[FIELD.siteName] || station[FIELD.callSign] || "the station";
+    const km = (metres) => (metres / 1000).toFixed(1);
+    const status = analysis.status;
+    const index = status === "blocked" ? analysis.worstClearanceIndex : analysis.worstFractionIndex;
     const percent = analysis.worstFraction >= 1 ? "100%+" : `${Math.max(0, Math.round(analysis.worstFraction * 100))}%`;
-    const verdict = {
-        blocked: `<strong class="los-bad">Blocked.</strong> Ground rises ${Math.round(-analysis.worstClearance)} m above the line ${km(analysis.worstClearanceIndex)} km from you.`,
-        marginal: `<strong class="los-warn">Line of sight, but marginal.</strong> Only ${percent} of the first Fresnel zone is clear at ${km(analysis.worstFractionIndex)} km, so the signal may be weak or fade.`,
-        clear: `<strong class="los-good">Clear line of sight.</strong> The first Fresnel zone is clear (${percent} at the tightest point; 60% or more is good).`,
-    }[analysis.status];
-    el("losVerdict").innerHTML = `${verdict} <span class="los-distance">${(analysis.total / 1000).toFixed(1)} km path</span>`;
-    el("losChart").innerHTML = lineOfSightChartSvg(analysis, { from: "You", to: station[FIELD.siteName] || station[FIELD.callSign] || "Station" });
+
+    // One big line for the verdict, over the chart
+    const headline = {
+        blocked: `<strong class="los-bad">Blocked</strong>`,
+        marginal: `<strong class="los-warn">Marginal</strong>`,
+        clear: `<strong class="los-good">Clear line of sight</strong>`,
+    }[status];
+    el("losVerdict").innerHTML = `${headline} <span class="los-distance">${km(analysis.total)} km path</span>`;
+    el("losChart").innerHTML = lineOfSightChartSvg(analysis, { from: "You", to: stationName }, Math.max(280, Math.floor(el("losChart").clientWidth) || 640));
+
+    // Where it is blocked: always shown under the chart, in short lines
+    const ground = elevations[index];
+    const curve = analysis.ground[index] - ground;
+    const lineHeight = analysis.line[index];
+    const clearance = lineHeight - analysis.ground[index];
+    const point = greatCirclePoint(from, to, analysis.distances[index] / analysis.total);
+    lineOfSight.point = point;
+    lineOfSight.pointLabel = status === "blocked" ? `Blocked here: ${Math.round(-clearance)} m in the way` : "Tightest point";
+    const title = {
+        blocked: `Blocked ${km(analysis.distances[index])} km from you`,
+        marginal: `Tightest point ${km(analysis.distances[index])} km from you`,
+        clear: `Tightest point ${km(analysis.distances[index])} km from you`,
+    }[status];
+    const summary = {
+        blocked: `Ground is <strong>${Math.round(-clearance)} m above</strong> the line of sight.`,
+        marginal: `Only <strong>${percent}</strong> of the Fresnel zone is clear, so the signal may be weak or fade.`,
+        clear: `The Fresnel zone is clear (${percent}; 60% or more is good).`,
+    }[status];
+    el("losDetail").className = `los-detail los-detail-${status}`;
+    el("losDetail").innerHTML =
+        `<div class="los-detail-title">${title}</div>` +
+        `<div class="los-detail-line">${summary}</div>` +
+        `<div class="los-detail-facts">${km(analysis.total - analysis.distances[index])} km from ${escapeHtml(stationName)}. ` +
+        `Ground ${Math.round(ground)} m${curve >= 1 ? ` + ${Math.round(curve)} m earth curve` : ""}, line of sight ${Math.round(lineHeight)} m. ` +
+        `Near ${point[0].toFixed(4)}, ${point[1].toFixed(4)}.</div>` +
+        `<button type="button" class="link-btn los-map-btn" id="losShowOnMap">Show on map</button>`;
+}
+
+// Put a red spot on the map where the path is blocked. Tap it to remove it.
+function showBlockedOnMap(point, label) {
+    if (losMarker) losMarker.remove();
+    losMarker = L.circleMarker(point, { radius: 9, color: "#fff", weight: 3, fillColor: "#b3261e", fillOpacity: 1 })
+        .addTo(map)
+        .bindTooltip(label, { permanent: true, direction: "top", offset: [0, -10] });
+    losMarker.on("click", () => {
+        losMarker.remove();
+        losMarker = null;
+    });
+    el("losDialog").close();
+    map.setView(point, Math.max(map.getZoom(), 11));
 }
 
 async function openLineOfSight(station) {
@@ -2447,6 +2526,11 @@ async function openLineOfSight(station) {
     const from = [userPosition[0], userPosition[1]];
     const to = [station[FIELD.lat], station[FIELD.lon]];
     lineOfSight = { station, from, to };
+    if (losMarker) {
+        losMarker.remove(); // the red spot from an earlier chart
+        losMarker = null;
+    }
+    el("losDetail").innerHTML = "";
 
     el("losTitle").textContent = `Line of sight to ${station[FIELD.siteName] || station[FIELD.callSign] || "station"}`;
     el("losYourHeight").value = settings.losYourHeight;
@@ -2485,6 +2569,14 @@ function wireLineOfSight() {
             renderLineOfSight();
         })
     );
+    // The "Show on map" button is rebuilt with every chart, so listen on the panel around it
+    el("losDetail").addEventListener("click", (event) => {
+        if (event.target.closest("#losShowOnMap") && lineOfSight && lineOfSight.point) showBlockedOnMap(lineOfSight.point, lineOfSight.pointLabel);
+    });
+    // Redraw the chart at the new width when the phone is turned or the window is resized
+    window.addEventListener("resize", () => {
+        if (el("losDialog").open) renderLineOfSight();
+    });
     el("losClose").onclick = () => el("losDialog").close();
     el("losDialog").addEventListener("click", (event) => {
         if (event.target === el("losDialog")) el("losDialog").close(); // a click on the dimmed backdrop
